@@ -1,0 +1,127 @@
+using System;
+using System.Configuration;
+using System.IO;
+using ClosedXML.Excel;
+
+namespace CsvToExcelOrganizer
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            try
+            {
+                // Step 1: Read config values
+                string sourceFolder = ConfigurationManager.AppSettings["SourceFolder"];
+                string baseDestFolder = ConfigurationManager.AppSettings["DestinationBaseFolder"];
+                var today = DateTime.Today;
+
+                if (!Directory.Exists(sourceFolder))
+                {
+                    Console.WriteLine($"Source folder not found: {sourceFolder}");
+                    return;
+                }
+
+                // Step 2: Create Year/Month/Date folder structure
+                string path = Path.Combine(baseDestFolder, today.Year.ToString());
+                Directory.CreateDirectory(path);
+
+                path = Path.Combine(path, today.ToString("MM"));
+                Directory.CreateDirectory(path);
+
+                string dateFolderPath = Path.Combine(path, today.ToString("ddMMyyyy"));
+                Directory.CreateDirectory(dateFolderPath);
+
+                // Step 3: Copy today's CSV files to destination
+                foreach (var filePath in Directory.EnumerateFiles(sourceFolder, "*.csv"))
+                {
+                    try
+                    {
+                        var fileDate = File.GetLastWriteTime(filePath).Date;
+
+                        if (fileDate == today)
+                        {
+                            string destPath = Path.Combine(dateFolderPath, Path.GetFileName(filePath));
+
+                            if (!File.Exists(destPath))
+                            {
+                                File.Copy(filePath, destPath, false);
+                                Console.WriteLine($"Copied: {Path.GetFileName(filePath)}");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"Skipped (duplicate): {Path.GetFileName(filePath)}");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error copying file {filePath}: {ex.Message}");
+                    }
+                }
+
+                // Step 4: Convert all CSV files in today's folder to Excel
+                foreach (var csvFile in Directory.EnumerateFiles(dateFolderPath, "*.csv"))
+                {
+                    try
+                    {
+                        string excelFilePath = Path.ChangeExtension(csvFile, ".xlsx");
+
+                        if (File.Exists(excelFilePath))
+                        {
+                            Console.WriteLine($"Skipped (Excel already exists): {Path.GetFileName(excelFilePath)}");
+                            continue;
+                        }
+
+                        using (var workbook = new XLWorkbook())
+                        {
+                            var worksheet = workbook.Worksheets.Add("Sheet1");
+                            int row = 1;
+
+                            using (var reader = new StreamReader(csvFile))
+                            {
+                                while (!reader.EndOfStream)
+                                {
+                                    var values = reader.ReadLine().Split(',');
+                                    for (int col = 0; col < values.Length; col++)
+                                    {
+                                        worksheet.Cell(row, col + 1).Value = values[col];
+                                    }
+                                    row++;
+                                }
+                            }
+
+                            workbook.SaveAs(excelFilePath);
+                        }
+
+                        Console.WriteLine($"Converted: {Path.GetFileName(csvFile)} → {Path.GetFileName(excelFilePath)}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error converting {csvFile}: {ex.Message}");
+                    }
+                }
+
+                Console.WriteLine("Processing completed successfully.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Unexpected error: {ex.Message}");
+            }
+        }
+    }
+}
+
+
+
+
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+  <appSettings>
+    <!-- Source folder where CSV files arrive -->
+    <add key="SourceFolder" value="D:\Akshat" />
+
+    <!-- Base destination folder -->
+    <add key="DestinationBaseFolder" value="D:\ProcessedFiles" />
+  </appSettings>
+</configuration>
