@@ -175,3 +175,50 @@ namespace CsvToExcelOrganizer
         }
     }
 }
+
+
+
+
+using ClosedXML.Excel;
+using System;
+using System.Globalization;
+
+namespace CsvToExcelOrganizer
+{
+    public static class DataParser
+    {
+        // Method to clean/format Excel file after conversion
+        public static void CleanExcel(string excelFilePath)
+        {
+            using (var workbook = new XLWorkbook(excelFilePath))
+            {
+                foreach (var worksheet in workbook.Worksheets)
+                {
+                    foreach (var cell in worksheet.CellsUsed())
+                    {
+                        string raw = cell.Value.ToString();
+
+                        if (double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out double number))
+                        {
+                            // Format as numeric with 3 decimal places
+                            cell.SetValue(Math.Round(number, 3));
+                        }
+                        else if (DateTime.TryParse(raw, out DateTime date))
+                        {
+                            // Format as date
+                            cell.SetValue(date);
+                        }
+                        else
+                        {
+                            // Treat as text
+                            cell.SetValue(raw.Trim());
+                        }
+                    }
+                }
+                workbook.Save();
+            }
+
+            Console.WriteLine($"Parsed and cleaned: {excelFilePath}");
+        }
+    }
+}
