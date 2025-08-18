@@ -1,0 +1,203 @@
+using System;
+using System.Data.SqlClient;
+using ClosedXML.Excel;
+
+namespace EmsConsole
+{
+    public class SqlData
+    {
+        private readonly string _connectionString;
+
+        public SqlData(string connectionString)
+        {
+            _connectionString = connectionString;
+        }
+
+        // Public method to process a single Excel file
+        public void ProcessFile(string filePath)
+        {
+            using (var workbook = new XLWorkbook(filePath))
+            {
+                var worksheet = workbook.Worksheet(1);
+
+                // GatewayName and DeviceName - assuming in A1 and B1
+                string gatewayName = worksheet.Cell("A1").GetValue<string>();
+                string deviceName = worksheet.Cell("B1").GetValue<string>();
+
+                int deviceId = GetOrCreateDevice(deviceName, gatewayName);
+
+                int startRow = 3; // Adjust to where timestamp and energy columns start
+
+                while (true)
+                {
+                    var timeCell = worksheet.Cell(startRow, 1).GetValue<string>();
+                    var energyCell = worksheet.Cell(startRow, 2).GetValue<string>();
+
+                    if (string.IsNullOrEmpty(timeCell))
+                        break;
+
+                    if (!DateTime.TryParse(timeCell, out DateTime timestamp))
+                        throw new Exception($"Invalid timestamp at row {startRow} in file {filePath}");
+
+                    if (!double.TryParse(energyCell, out double energy))
+                        throw new Exception($"Invalid energy at row {startRow} in file {filePath}");
+
+                    InsertEnergyReading(deviceId, timestamp, energy);
+                    startRow++;
+                }
+
+                Console.WriteLine($"Inserted SQL data for: {System.IO.Path.GetFileName(filePath)}");
+            }
+        }
+
+        private int GetOrCreateDevice(string deviceName, string gatewayName)
+        {
+            using (var conn = new SqlConnection(_connectionString))
+            {
+                conn.Open();
+                string query = @"
+                    IF NOT EXISTS (SELECT 1 FROM EMS.Device WHERE DeviceName=@DeviceName AND GatewayName=@GatewayName)
+                    BEGIN
+                        INSERT INTO EMS.Device (DeviceName, GatewayName) VALUES (@DeviceName, @GatewayName)
+                    END
+                    SELECT DeviceID FROM EMS.Device WHERE DeviceName=@DeviceName AND GatewayName=@GatewayName;
+                ";
+
+                using (var cmd = new SqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@DeviceName", deviceName);
+                    cmd.Parameters.AddWithValue("@GatewayName", gatewayName);
+                    return (int)cmd.ExecuteScalar();
+                }
+            }
+        }
+
+        private void InsertEnergyReading(int deviceId, DateTime timestamp, double energy)
+        {
+            using (var conn = new SqlConnection(_connectionString))
+            {
+                conn.Open();
+                string query = @"
+                    INSERT INTO EMS.EnergyReadings (DeviceID, LocalTimeStamp, ActiveEnergyDelivered)
+                    VALUES (@DeviceID, @LocalTimeStamp, @ActiveEnergyDelivered);
+                ";
+                using (var cmd = new SqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@DeviceID", deviceId);
+                    cmd.Parameters.AddWithValue("@LocalTimeStamp", timestamp);
+                    cmd.Parameters.AddWithValue("@ActiveEnergyDelivered", energy);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+        }
+    }
+}
+
+
+
+
+using System;
+using System.Configuration;
+using System.IO;
+using ClosedXML.Excel;
+using EmsConsole;
+
+namespace CsvToExcelOrganizer
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            try
+            {
+                string sourceFolder = ConfigurationManager.AppSettings["SourceFolder"];
+                string baseDestFolder = ConfigurationManager.AppSettings["DestinationBaseFolder"];
+                string connectionString = ConfigurationManager.AppSettings["SqlConnectionString"];
+                SqlData sqlData = new SqlData(connectionString);
+
+                var today = DateTime.Today;
+
+                if (!Directory.Exists(sourceFolder))
+                {
+                    Console.WriteLine($"Source folder not found: {sourceFolder}");
+                    return;
+                }
+
+                // Create Year/Month/Date folder structure
+                string path = Path.Combine(baseDestFolder, today.Year.ToString());
+                Directory.CreateDirectory(path);
+
+                path = Path.Combine(path, today.ToString("MM"));
+                Directory.CreateDirectory(path);
+
+                string dateFolderPath = Path.Combine(path, today.ToString("ddMMyyyy"));
+                Directory.CreateDirectory(dateFolderPath);
+
+                // Copy today's CSV files
+                foreach (var filePath in Directory.EnumerateFiles(sourceFolder, "*.csv"))
+                {
+                    var fileDate = File.GetLastWriteTime(filePath).Date;
+                    if (fileDate == today)
+                    {
+                        string destPath = Path.Combine(dateFolderPath, Path.GetFileName(filePath));
+                        if (!File.Exists(destPath))
+                            File.Copy(filePath, destPath);
+                    }
+                }
+
+                // Convert CSV → Excel
+                foreach (var csvFile in Directory.EnumerateFiles(dateFolderPath, "*.csv"))
+                {
+                    string excelFilePath = Path.ChangeExtension(csvFile, ".xlsx");
+                    if (!File.Exists(excelFilePath))
+                    {
+                        using (var workbook = new XLWorkbook())
+                        {
+                            var worksheet = workbook.Worksheets.Add("Sheet1");
+                            int row = 1;
+                            using (var reader = new StreamReader(csvFile))
+                            {
+                                while (!reader.EndOfStream)
+                                {
+                                    var values = reader.ReadLine().Split(',');
+                                    for (int col = 0; col < values.Length; col++)
+                                        worksheet.Cell(row, col + 1).Value = values[col];
+                                    row++;
+                                }
+                            }
+                            workbook.SaveAs(excelFilePath);
+                        }
+                    }
+
+                    // Insert Excel data into SQL
+                    try
+                    {
+                        sqlData.ProcessFile(excelFilePath);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error inserting SQL for {excelFilePath}: {ex.Message}");
+                    }
+                }
+
+                Console.WriteLine("All processing completed successfully.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Unexpected error: {ex.Message}");
+            }
+        }
+    }
+}
+
+
+
+
+
+<configuration>
+  <appSettings>
+    <add key="SourceFolder" value="C:\Users\YourUser\Desktop\CSVFiles"/>
+    <add key="DestinationBaseFolder" value="C:\Users\YourUser\Desktop\ProcessedFiles"/>
+    <add key="SqlConnectionString" value="Server=.\SQLEXPRESS;Database=EmsDb;User Id=sa;Password=YourPassword;"/>
+  </appSettings>
+</configuration>
