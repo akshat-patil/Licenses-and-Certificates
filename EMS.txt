@@ -13,34 +13,34 @@ namespace EmsConsole
             _connectionString = connectionString;
         }
 
-        // Public method to process a single Excel file
         public void ProcessFile(string filePath)
         {
             using (var workbook = new XLWorkbook(filePath))
             {
                 var worksheet = workbook.Worksheet(1);
 
-                // GatewayName and DeviceName - assuming in A1 and B1
-                string gatewayName = worksheet.Cell("A1").GetValue<string>();
-                string deviceName = worksheet.Cell("B1").GetValue<string>();
+                // Row 2 contains Gateway and Device names
+                string gatewayName = worksheet.Cell("A2").GetValue<string>();
+                string deviceName  = worksheet.Cell("B2").GetValue<string>();
 
                 int deviceId = GetOrCreateDevice(deviceName, gatewayName);
 
-                int startRow = 3; // Adjust to where timestamp and energy columns start
+                // Data starts from row 8, LocalTimeStamp=Col C (3), ActiveEnergy=Col K (11)
+                int startRow = 8;
 
                 while (true)
                 {
-                    var timeCell = worksheet.Cell(startRow, 1).GetValue<string>();
-                    var energyCell = worksheet.Cell(startRow, 2).GetValue<string>();
+                    var timeCell = worksheet.Cell(startRow, 3).GetValue<string>();   // C
+                    var energyCell = worksheet.Cell(startRow, 11).GetValue<string>(); // K
 
-                    if (string.IsNullOrEmpty(timeCell))
+                    if (string.IsNullOrEmpty(timeCell) && string.IsNullOrEmpty(energyCell))
                         break;
 
                     if (!DateTime.TryParse(timeCell, out DateTime timestamp))
-                        throw new Exception($"Invalid timestamp at row {startRow} in file {filePath}");
+                        throw new Exception($"Invalid timestamp at row {startRow} in {filePath}");
 
                     if (!double.TryParse(energyCell, out double energy))
-                        throw new Exception($"Invalid energy at row {startRow} in file {filePath}");
+                        throw new Exception($"Invalid energy at row {startRow} in {filePath}");
 
                     InsertEnergyReading(deviceId, timestamp, energy);
                     startRow++;
