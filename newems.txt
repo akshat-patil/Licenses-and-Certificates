@@ -1,0 +1,224 @@
+<configuration>
+  <appSettings>
+    <add key="EMS_CsvFolder" value="C:\Users\YourUser\Desktop\EMS_CsvFiles"/>
+    <add key="EMS_ExcelFolder" value="C:\Users\YourUser\Desktop\EMS_ExcelFiles"/>
+    <add key="EMS_SqlConnection" value="Server=.\SQLEXPRESS;Database=EmsDb;User Id=sa;Password=YourPassword;"/>
+  </appSettings>
+</configuration>
+
+
+
+
+
+
+
+using System;
+using System.Configuration;
+using System.IO;
+using ClosedXML.Excel;
+using EmsConsole;
+
+namespace EMSProcessor
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            try
+            {
+                // Config values
+                string vCsvFolder = ConfigurationManager.AppSettings["EMS_CsvFolder"];
+                string vExcelFolder = ConfigurationManager.AppSettings["EMS_ExcelFolder"];
+                string vSqlConnection = ConfigurationManager.AppSettings["EMS_SqlConnection"];
+
+                SqlData oSqlData = new SqlData(vSqlConnection);
+
+                var vTodayDate = DateTime.Today;
+
+                if (!Directory.Exists(vCsvFolder))
+                {
+                    Console.WriteLine($"EMS CSV folder not found: {vCsvFolder}");
+                    return;
+                }
+
+                // Create EMS folder hierarchy: Year/Month/Date
+                string vPathYear = Path.Combine(vExcelFolder, vTodayDate.Year.ToString());
+                Directory.CreateDirectory(vPathYear);
+
+                string vPathMonth = Path.Combine(vPathYear, vTodayDate.ToString("MM"));
+                Directory.CreateDirectory(vPathMonth);
+
+                string vPathDate = Path.Combine(vPathMonth, vTodayDate.ToString("ddMMyyyy"));
+                Directory.CreateDirectory(vPathDate);
+
+                // Copy today's CSV files
+                foreach (var vCsvFile in Directory.EnumerateFiles(vCsvFolder, "*.csv"))
+                {
+                    var vFileDate = File.GetLastWriteTime(vCsvFile).Date;
+                    if (vFileDate == vTodayDate)
+                    {
+                        string vCsvDestFile = Path.Combine(vPathDate, Path.GetFileName(vCsvFile));
+                        if (!File.Exists(vCsvDestFile))
+                            File.Copy(vCsvFile, vCsvDestFile);
+                    }
+                }
+
+                // Convert CSV → Excel
+                foreach (var vCsvFile in Directory.EnumerateFiles(vPathDate, "*.csv"))
+                {
+                    string vExcelFile = Path.ChangeExtension(vCsvFile, ".xlsx");
+
+                    if (!File.Exists(vExcelFile))
+                    {
+                        using (var oWorkbook = new XLWorkbook())
+                        {
+                            var oWorksheet = oWorkbook.Worksheets.Add("Sheet1");
+                            int vRowIndex = 1;
+
+                            using (var oReader = new StreamReader(vCsvFile))
+                            {
+                                while (!oReader.EndOfStream)
+                                {
+                                    var vValues = oReader.ReadLine().Split(',');
+                                    for (int vColIndex = 0; vColIndex < vValues.Length; vColIndex++)
+                                        oWorksheet.Cell(vRowIndex, vColIndex + 1).Value = vValues[vColIndex];
+                                    vRowIndex++;
+                                }
+                            }
+
+                            oWorkbook.SaveAs(vExcelFile);
+                        }
+                    }
+
+                    // Insert Excel data into SQL
+                    try
+                    {
+                        oSqlData.ProcessFile(vExcelFile);
+                    }
+                    catch (Exception oEx)
+                    {
+                        Console.WriteLine($"Error inserting SQL for {vExcelFile}: {oEx.Message}");
+                    }
+                }
+
+                Console.WriteLine("✅ EMS Processing completed successfully.");
+            }
+            catch (Exception oEx)
+            {
+                Console.WriteLine($"Unexpected error: {oEx.Message}");
+            }
+        }
+    }
+}
+
+
+
+
+
+
+
+
+using System;
+using System.Collections.Generic;
+using System.Data.SqlClient;
+using System.IO;
+using ExcelDataReader;
+
+namespace EmsConsole
+{
+    public class DataParser
+    {
+        private readonly string _connectionString;
+
+        public DataParser(string connectionString)
+        {
+            _connectionString = connectionString;
+        }
+
+        public void ParseAndInsert(string filePath)
+        {
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
+            using (var stream = File.Open(filePath, FileMode.Open, FileAccess.Read))
+            using (var reader = ExcelReaderFactory.CreateReader(stream))
+            {
+                var headerMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                string gatewayName = null;
+                string deviceName = null;
+
+                bool headerRowRead = false;
+
+                while (reader.Read())
+                {
+                    if (!headerRowRead)
+                    {
+                        for (int i = 0; i < reader.FieldCount; i++)
+                        {
+                            string colName = reader.GetValue(i)?.ToString().Trim();
+
+                            if (!string.IsNullOrEmpty(colName))
+                                headerMap[colName] = i;
+                        }
+                        headerRowRead = true;
+
+                        // Capture gateway + device name (they are in next row after headers)
+                        gatewayName = reader.GetValue(headerMap["Gateway Name"])?.ToString();
+                        deviceName = reader.GetValue(headerMap["Device Name"])?.ToString();
+
+                        continue;
+                    }
+
+                    // Skip blank rows
+                    if (reader.GetValue(0) == null) continue;
+
+                    // Get Local timestamp
+                    string localTimeStamp = reader.GetValue(headerMap["Local time stamp"])?.ToString();
+
+                    // Find energy column (OR condition)
+                    string[] possibleNames = {
+                        "TotalActiveDeliveredEnergy (Wh)",
+                        "Active energy (Wh)",
+                        "Active energy delivered (Wh)"
+                    };
+
+                    object energyVal = null;
+                    foreach (var name in possibleNames)
+                    {
+                        if (headerMap.ContainsKey(name))
+                        {
+                            energyVal = reader.GetValue(headerMap[name]);
+                            break;
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(localTimeStamp) && energyVal != null)
+                    {
+                        InsertToDb(gatewayName, deviceName, localTimeStamp, energyVal.ToString());
+                    }
+                }
+            }
+        }
+
+        private void InsertToDb(string gatewayName, string deviceName, string localTimeStamp, string energyValue)
+        {
+            using (SqlConnection conn = new SqlConnection(_connectionString))
+            {
+                conn.Open();
+                string query = @"INSERT INTO EnergyData
+                                (GatewayName, DeviceName, LocalTimeStamp, ActiveEnergy)
+                                VALUES (@GatewayName, @DeviceName, @LocalTimeStamp, @ActiveEnergy)";
+
+                using (SqlCommand cmd = new SqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@GatewayName", gatewayName ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@DeviceName", deviceName ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@LocalTimeStamp", localTimeStamp ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@ActiveEnergy", energyValue ?? (object)DBNull.Value);
+
+                    cmd.ExecuteNonQuery();
+                }
+            }
+        }
+    }
+}
+
