@@ -164,3 +164,149 @@ namespace EmsConsole
         }
     }
 }
+
+
+
+
+using System;
+using System.Configuration;
+using System.Data.SqlClient;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+
+namespace EmsConsole
+{
+    public static class CsvParser
+    {
+        public static void ParseAndInsert(string vCsvFilePath, string vLogFile)
+        {
+            try
+            {
+                string vConnectionString = ConfigurationManager.ConnectionStrings["EmsDb"].ConnectionString;
+
+                string[] vAllLines = File.ReadAllLines(vCsvFilePath);
+                if (vAllLines.Length < 2)
+                {
+                    File.AppendAllText(vLogFile, $"{DateTime.Now}: File too short: {vCsvFilePath}{Environment.NewLine}");
+                    return;
+                }
+
+                // Helper to clean headers
+                string Clean(string s) => s.Trim().Trim('"');
+
+                // ======= Step 1: Detect Gateway & Device =======
+                string[] vHeaderRow = vAllLines[0].Split(',');
+                string[] vValueRow = vAllLines[1].Split(',');
+
+                int vGatewayCol = Array.FindIndex(vHeaderRow, h => Clean(h).Equals("Gateway Name", StringComparison.OrdinalIgnoreCase));
+                int vDeviceCol = Array.FindIndex(vHeaderRow, h => Clean(h).Equals("Device Name", StringComparison.OrdinalIgnoreCase));
+
+                string vGatewayName = vGatewayCol >= 0 && vValueRow.Length > vGatewayCol ? vValueRow[vGatewayCol] : null;
+                string vDeviceName = vDeviceCol >= 0 && vValueRow.Length > vDeviceCol ? vValueRow[vDeviceCol] : null;
+
+                if (vGatewayName == null || vDeviceName == null)
+                {
+                    File.AppendAllText(vLogFile, $"{DateTime.Now}: Could not detect Gateway or Device in {vCsvFilePath}{Environment.NewLine}");
+                    return;
+                }
+
+                // ======= Step 2: Detect Data Header =======
+                // Find the row where timestamp and energy columns exist
+                int vDataHeaderRowIndex = Array.FindIndex(vAllLines, line =>
+                {
+                    string[] parts = line.Split(',');
+                    return parts.Any(p => Clean(p).Equals("Local TimeStamp", StringComparison.OrdinalIgnoreCase));
+                });
+
+                if (vDataHeaderRowIndex < 0)
+                {
+                    File.AppendAllText(vLogFile, $"{DateTime.Now}: Could not find data header in {vCsvFilePath}{Environment.NewLine}");
+                    return;
+                }
+
+                string[] vDataHeader = vAllLines[vDataHeaderRowIndex].Split(',');
+
+                int vTimestampCol = Array.FindIndex(vDataHeader, h => Clean(h).Equals("Local TimeStamp", StringComparison.OrdinalIgnoreCase));
+                int vEnergyCol = Array.FindIndex(vDataHeader, h =>
+                    Clean(h).Equals("TotalDeliveredActiveEnergy (Wh)", StringComparison.OrdinalIgnoreCase) ||
+                    Clean(h).Equals("Active energy (Wh)", StringComparison.OrdinalIgnoreCase) ||
+                    Clean(h).Equals("Active energy delivered (Wh)", StringComparison.OrdinalIgnoreCase));
+
+                if (vTimestampCol < 0 || vEnergyCol < 0)
+                {
+                    File.AppendAllText(vLogFile, $"{DateTime.Now}: Could not detect Timestamp or Energy column in {vCsvFilePath}{Environment.NewLine}");
+                    return;
+                }
+
+                // ======= Step 3: Insert into SQL =======
+                using (SqlConnection oSqlConn = new SqlConnection(vConnectionString))
+                {
+                    oSqlConn.Open();
+
+                    int vDeviceId = InsertOrGetDevice(oSqlConn, vGatewayName, vDeviceName);
+
+                    for (int i = vDataHeaderRowIndex + 1; i < vAllLines.Length; i++)
+                    {
+                        try
+                        {
+                            string[] vParts = vAllLines[i].Split(',');
+
+                            DateTime? vTimestamp = null;
+                            decimal? vEnergy = null;
+
+                            if (vParts.Length > vTimestampCol && DateTime.TryParse(vParts[vTimestampCol], out DateTime ts))
+                                vTimestamp = ts;
+
+                            if (vParts.Length > vEnergyCol && decimal.TryParse(vParts[vEnergyCol], NumberStyles.Any, CultureInfo.InvariantCulture, out decimal en))
+                                vEnergy = en;
+
+                            // Skip if both timestamp and energy are null
+                            if (vTimestamp == null && vEnergy == null) continue;
+
+                            using (SqlCommand oCmd = new SqlCommand(
+                                "INSERT INTO ems.EnergyReadings (DeviceId, LocalTimestamp, ActiveDeliveredEnergy) VALUES (@DeviceId, @LocalTimestamp, @Energy)", oSqlConn))
+                            {
+                                oCmd.Parameters.AddWithValue("@DeviceId", vDeviceId);
+                                oCmd.Parameters.AddWithValue("@LocalTimestamp", (object)vTimestamp ?? DBNull.Value);
+                                oCmd.Parameters.AddWithValue("@Energy", (object)vEnergy ?? DBNull.Value);
+                                oCmd.ExecuteNonQuery();
+                            }
+                        }
+                        catch (Exception oInnerEx)
+                        {
+                            File.AppendAllText(vLogFile, $"{DateTime.Now}: Row {i + 1} error: {oInnerEx.Message}{Environment.NewLine}");
+                        }
+                    }
+                }
+
+                File.AppendAllText(vLogFile, $"{DateTime.Now}: Successfully processed {vCsvFilePath}{Environment.NewLine}");
+            }
+            catch (Exception oEx)
+            {
+                File.AppendAllText(vLogFile, $"{DateTime.Now}: General error in file {vCsvFilePath}: {oEx.Message}{Environment.NewLine}");
+            }
+        }
+
+        private static int InsertOrGetDevice(SqlConnection oSqlConn, string vGatewayName, string vDeviceName)
+        {
+            using (SqlCommand oCheckCmd = new SqlCommand(
+                "SELECT DeviceId FROM ems.Device WHERE GatewayName=@GatewayName AND DeviceName=@DeviceName", oSqlConn))
+            {
+                oCheckCmd.Parameters.AddWithValue("@GatewayName", (object)vGatewayName ?? DBNull.Value);
+                oCheckCmd.Parameters.AddWithValue("@DeviceName", (object)vDeviceName ?? DBNull.Value);
+
+                object oResult = oCheckCmd.ExecuteScalar();
+                if (oResult != null) return (int)oResult;
+            }
+
+            using (SqlCommand oInsertCmd = new SqlCommand(
+                "INSERT INTO ems.Device (GatewayName, DeviceName) OUTPUT INSERTED.DeviceId VALUES (@GatewayName, @DeviceName)", oSqlConn))
+            {
+                oInsertCmd.Parameters.AddWithValue("@GatewayName", (object)vGatewayName ?? DBNull.Value);
+                oInsertCmd.Parameters.AddWithValue("@DeviceName", (object)vDeviceName ?? DBNull.Value);
+                return (int)oInsertCmd.ExecuteScalar();
+            }
+        }
+    }
+}
