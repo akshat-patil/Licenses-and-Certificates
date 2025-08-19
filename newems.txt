@@ -439,3 +439,83 @@ namespace EmsConsole
         }
     }
 }
+
+
+
+
+using System;
+using System.Configuration;
+using System.Data.SqlClient;
+using System.Globalization;
+using System.IO;
+
+namespace EmsConsole
+{
+    public static class CsvParser
+    {
+        public static void ParseAndInsert(string vCsvFile, string vLogFile)
+        {
+            try
+            {
+                string vConnectionString = ConfigurationManager.ConnectionStrings["EmsDb"].ConnectionString;
+
+                using (SqlConnection vConn = new SqlConnection(vConnectionString))
+                {
+                    vConn.Open();
+
+                    using (StreamReader vReader = new StreamReader(vCsvFile))
+                    {
+                        string vLine;
+                        bool vHeaderSkipped = false;
+
+                        while ((vLine = vReader.ReadLine()) != null)
+                        {
+                            if (!vHeaderSkipped)
+                            {
+                                vHeaderSkipped = true; // Skip header row
+                                continue;
+                            }
+
+                            string[] vColumns = vLine.Split(',');
+
+                            if (vColumns.Length < 3)
+                                continue; // skip invalid rows
+
+                            string vGateway = vColumns[0].Trim();
+                            string vDevice = vColumns[1].Trim();
+                            string vTimestamp = vColumns[2].Trim();
+                            string vEnergy = vColumns.Length > 3 ? vColumns[3].Trim() : null;
+
+                            DateTime vLocalTimestamp;
+                            if (!DateTime.TryParse(vTimestamp, CultureInfo.InvariantCulture, DateTimeStyles.None, out vLocalTimestamp))
+                                vLocalTimestamp = DateTime.Now;
+
+                            decimal vTotalEnergy;
+                            if (!decimal.TryParse(vEnergy, out vTotalEnergy))
+                                vTotalEnergy = 0;
+
+                            string vSql = @"
+                                INSERT INTO EmsEnergyData 
+                                (GatewayName, DeviceName, LocalTimestamp, TotalActiveDeliveredEnergy) 
+                                VALUES (@Gateway, @Device, @Timestamp, @Energy)";
+
+                            using (SqlCommand vCmd = new SqlCommand(vSql, vConn))
+                            {
+                                vCmd.Parameters.AddWithValue("@Gateway", vGateway);
+                                vCmd.Parameters.AddWithValue("@Device", vDevice);
+                                vCmd.Parameters.AddWithValue("@Timestamp", vLocalTimestamp);
+                                vCmd.Parameters.AddWithValue("@Energy", vTotalEnergy);
+
+                                vCmd.ExecuteNonQuery();
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception oEx)
+            {
+                File.AppendAllText(vLogFile, $"{DateTime.Now}: {oEx.Message}{Environment.NewLine}");
+            }
+        }
+    }
+}
