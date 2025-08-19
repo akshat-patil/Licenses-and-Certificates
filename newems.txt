@@ -222,3 +222,220 @@ namespace EmsConsole
     }
 }
 
+
+
+
+CREATE SCHEMA ems;
+GO
+
+-- Device table
+CREATE TABLE ems.Device
+(
+    DeviceId INT IDENTITY(1,1) PRIMARY KEY,
+    GatewayName NVARCHAR(200) NOT NULL,
+    DeviceName NVARCHAR(200) NOT NULL,
+    CONSTRAINT UQ_Device UNIQUE (GatewayName, DeviceName)
+);
+GO
+
+-- Energy Readings table
+CREATE TABLE ems.EnergyReadings
+(
+    ReadingId INT IDENTITY(1,1) PRIMARY KEY,
+    DeviceId INT NOT NULL,
+    LocalTimestamp DATETIME NOT NULL,
+    ActiveEnergyDelivered FLOAT NOT NULL,
+    FOREIGN KEY (DeviceId) REFERENCES ems.Device(DeviceId)
+);
+GO
+
+
+
+
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data.SqlClient;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+
+namespace EmsConsole
+{
+    class CsvParser
+    {
+        public static void ParseAndInsert(string csvFile, string logFile)
+        {
+            try
+            {
+                string[] allLines = File.ReadAllLines(csvFile);
+                if (allLines.Length == 0) return;
+
+                // find header row dynamically
+                int headerRowIndex = -1;
+                string[] headers = null;
+
+                try
+                {
+                    for (int i = 0; i < allLines.Length; i++)
+                    {
+                        var cols = allLines[i].Split(',').Select(c => c.Trim()).ToArray();
+                        if (cols.Any(c => c.Equals("Gateway Name", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            headers = cols;
+                            headerRowIndex = i;
+                            break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogError(logFile, csvFile, "Error while finding header row", ex);
+                    return;
+                }
+
+                if (headers == null)
+                {
+                    LogError(logFile, csvFile, "Header row not found in file", null);
+                    return;
+                }
+
+                // column indexes
+                int gatewayIndex = Array.FindIndex(headers, h => h.Equals("Gateway Name", StringComparison.OrdinalIgnoreCase));
+                int deviceIndex = Array.FindIndex(headers, h => h.Equals("Device Name", StringComparison.OrdinalIgnoreCase));
+                int timeIndex = Array.FindIndex(headers, h => h.Equals("Local Time Stamp", StringComparison.OrdinalIgnoreCase));
+                int energyIndex = Array.FindIndex(headers, h =>
+                    h.Equals("TotalDeliveredActiveEnergy (Wh)", StringComparison.OrdinalIgnoreCase) ||
+                    h.Equals("Active energy (Wh)", StringComparison.OrdinalIgnoreCase) ||
+                    h.Equals("Active energy delivered (Wh)", StringComparison.OrdinalIgnoreCase));
+
+                if (gatewayIndex == -1 || deviceIndex == -1 || timeIndex == -1 || energyIndex == -1)
+                {
+                    LogError(logFile, csvFile, "Missing required column(s) in file", null);
+                    return;
+                }
+
+                // Gateway & Device from row immediately after headers
+                string[] firstDataRow = allLines[headerRowIndex + 1].Split(',').Select(c => c.Trim()).ToArray();
+                string gatewayName = firstDataRow[gatewayIndex];
+                string deviceName = firstDataRow[deviceIndex];
+
+                // Collect readings
+                var records = new List<(DateTime LocalTime, double Energy)>();
+
+                try
+                {
+                    for (int i = headerRowIndex + 1; i < allLines.Length; i++)
+                    {
+                        var cols = allLines[i].Split(',').Select(c => c.Trim()).ToArray();
+                        if (cols.Length <= Math.Max(timeIndex, energyIndex)) continue;
+
+                        if (DateTime.TryParse(cols[timeIndex], out DateTime localTime) &&
+                            double.TryParse(cols[energyIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out double energyValue))
+                        {
+                            records.Add((localTime, energyValue));
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogError(logFile, csvFile, "Error while parsing data rows", ex);
+                    return;
+                }
+
+                // insert into DB
+                try
+                {
+                    InsertIntoDatabase(gatewayName, deviceName, records, logFile, csvFile);
+                }
+                catch (Exception ex)
+                {
+                    LogError(logFile, csvFile, "Error while inserting into database", ex);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError(logFile, csvFile, "General error in ParseAndInsert", ex);
+            }
+        }
+
+        private static void InsertIntoDatabase(string gateway, string device, List<(DateTime LocalTime, double Energy)> records, string logFile, string csvFile)
+        {
+            try
+            {
+                string connectionString = ConfigurationManager.ConnectionStrings["EmsDb"].ConnectionString;
+
+                using (SqlConnection conn = new SqlConnection(connectionString))
+                {
+                    conn.Open();
+
+                    // check if device exists
+                    int deviceId;
+                    string checkSql = "SELECT DeviceId FROM ems.Device WHERE GatewayName = @GatewayName AND DeviceName = @DeviceName";
+
+                    using (SqlCommand cmd = new SqlCommand(checkSql, conn))
+                    {
+                        cmd.Parameters.AddWithValue("@GatewayName", gateway);
+                        cmd.Parameters.AddWithValue("@DeviceName", device);
+
+                        object result = cmd.ExecuteScalar();
+                        if (result != null)
+                        {
+                            deviceId = Convert.ToInt32(result);
+                        }
+                        else
+                        {
+                            // insert new device
+                            string insertDeviceSql = @"
+                                INSERT INTO ems.Device (GatewayName, DeviceName) 
+                                OUTPUT INSERTED.DeviceId 
+                                VALUES (@GatewayName, @DeviceName)";
+                            using (SqlCommand insertCmd = new SqlCommand(insertDeviceSql, conn))
+                            {
+                                insertCmd.Parameters.AddWithValue("@GatewayName", gateway);
+                                insertCmd.Parameters.AddWithValue("@DeviceName", device);
+                                deviceId = (int)insertCmd.ExecuteScalar();
+                            }
+                        }
+                    }
+
+                    // insert energy readings
+                    string insertReadingSql = @"
+                        INSERT INTO ems.EnergyReadings (DeviceId, LocalTimestamp, ActiveEnergyDelivered)
+                        VALUES (@DeviceId, @LocalTimestamp, @Energy)";
+
+                    foreach (var record in records)
+                    {
+                        using (SqlCommand cmd = new SqlCommand(insertReadingSql, conn))
+                        {
+                            cmd.Parameters.AddWithValue("@DeviceId", deviceId);
+                            cmd.Parameters.AddWithValue("@LocalTimestamp", record.LocalTime);
+                            cmd.Parameters.AddWithValue("@Energy", record.Energy);
+                            cmd.ExecuteNonQuery();
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError(logFile, csvFile, "Error inside InsertIntoDatabase", ex);
+            }
+        }
+
+        private static void LogError(string logFile, string csvFile, string stage, Exception ex)
+        {
+            try
+            {
+                string message = $"{DateTime.Now:u} | File: {Path.GetFileName(csvFile)} | Stage: {stage}";
+                if (ex != null) message += $" | Error: {ex.Message}";
+                message += Environment.NewLine;
+
+                File.AppendAllText(logFile, message);
+            }
+            catch
+            {
+                // failsafe: do nothing if even logging fails
+            }
+        }
+    }
+}
