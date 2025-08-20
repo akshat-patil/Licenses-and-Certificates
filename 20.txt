@@ -266,3 +266,118 @@ namespace EmsConsole
 		<add key="EMS_SqlConnection" value="Server=.\SQLEXPRESS;Database=EmsDb;User Id=sa;Password=harry@1234;" />
 	</appSettings>
 </configuration>
+
+
+
+using System;
+using System.Collections.Generic;
+using System.Data.SqlClient;
+using System.Globalization;
+using System.IO;
+using CsvHelper;
+
+namespace EmsConsole
+{
+    class CsvParser
+    {
+        private readonly string vCsvFolder;
+        private readonly string vLogFile;
+        private readonly string vConnectionString;
+
+        public CsvParser(string vCsvFolder, string vLogFile, string vConnectionString)
+        {
+            this.vCsvFolder = vCsvFolder;
+            this.vLogFile = vLogFile;
+            this.vConnectionString = vConnectionString;
+        }
+
+        public void ProcessCsvFiles()
+        {
+            try
+            {
+                foreach (string vFile in Directory.GetFiles(vCsvFolder, "*.csv"))
+                {
+                    try
+                    {
+                        ProcessSingleCsv(vFile);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError($"Error processing file {Path.GetFileName(vFile)}: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error reading CSV folder: {ex.Message}");
+            }
+        }
+
+        private void ProcessSingleCsv(string vFilePath)
+        {
+            using (var oReader = new StreamReader(vFilePath))
+            using (var oCsv = new CsvReader(oReader, CultureInfo.InvariantCulture))
+            {
+                oCsv.Context.RegisterClassMap<CsvRecordMap>();
+
+                var vRecords = oCsv.GetRecords<CsvRecord>();
+
+                string vGatewayName = null;
+                string vDeviceName = null;
+
+                foreach (var record in vRecords)
+                {
+                    if (record.Error != 0) continue; // skip bad rows
+
+                    // Cache Gateway & Device once
+                    if (string.IsNullOrEmpty(vGatewayName))
+                    {
+                        vGatewayName = record.GatewayName;
+                        vDeviceName = record.DeviceName;
+                        InsertDevice(vGatewayName, vDeviceName);
+                    }
+
+                    InsertEnergy(record.DeviceName, record.LocalTimestamp, record.ActiveEnergyDelivered);
+                }
+            }
+        }
+
+        private void InsertDevice(string vGatewayName, string vDeviceName)
+        {
+            using (SqlConnection oConn = new SqlConnection(vConnectionString))
+            {
+                oConn.Open();
+                string vQuery = @"IF NOT EXISTS (SELECT 1 FROM ems.Device WHERE GatewayName=@GatewayName AND DeviceName=@DeviceName)
+                                  INSERT INTO ems.Device (GatewayName, DeviceName) VALUES (@GatewayName, @DeviceName)";
+                using (SqlCommand oCmd = new SqlCommand(vQuery, oConn))
+                {
+                    oCmd.Parameters.AddWithValue("@GatewayName", vGatewayName ?? "");
+                    oCmd.Parameters.AddWithValue("@DeviceName", vDeviceName ?? "");
+                    oCmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private void InsertEnergy(string vDeviceName, DateTime vTimestamp, double vEnergyValue)
+        {
+            using (SqlConnection oConn = new SqlConnection(vConnectionString))
+            {
+                oConn.Open();
+                string vQuery = @"INSERT INTO ems.Energy (DeviceName, LocalTimestamp, ActiveEnergyDeliveted) 
+                                  VALUES (@DeviceName, @LocalTimestamp, @ActiveEnergyDeliveted)";
+                using (SqlCommand oCmd = new SqlCommand(vQuery, oConn))
+                {
+                    oCmd.Parameters.AddWithValue("@DeviceName", vDeviceName);
+                    oCmd.Parameters.AddWithValue("@LocalTimestamp", vTimestamp);
+                    oCmd.Parameters.AddWithValue("@ActiveEnergyDeliveted", vEnergyValue);
+                    oCmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private void LogError(string vMessage)
+        {
+            File.AppendAllText(vLogFile, $"{DateTime.Now} - {vMessage}{Environment.NewLine}");
+        }
+    }
+}
