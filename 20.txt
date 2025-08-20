@@ -1,0 +1,236 @@
+using System;
+using System.Configuration;
+using System.IO;
+
+namespace EmsConsole
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            string vCsvFolder = ConfigurationManager.AppSettings["EMS_CsvFolder"];
+            string vDirectoryRoot = ConfigurationManager.AppSettings["EMS_DirectoryRoot"];
+            string vLogFile = ConfigurationManager.AppSettings["EMS_LogFile"];
+            string vConnectionString = ConfigurationManager.AppSettings["EMS_SqlConnection"];
+
+            try
+            {
+                var vTodayDate = DateTime.Today;
+
+                // 1. Create directory structure: Year/Month/Date
+                string vPathYear = Path.Combine(vDirectoryRoot, vTodayDate.Year.ToString());
+                Directory.CreateDirectory(vPathYear);
+
+                string vPathMonth = Path.Combine(vPathYear, vTodayDate.ToString("MM"));
+                Directory.CreateDirectory(vPathMonth);
+
+                string vPathDate = Path.Combine(vPathMonth, vTodayDate.ToString("ddMMyyyy"));
+                Directory.CreateDirectory(vPathDate);
+
+                // 2. Copy today's CSV files to the date folder
+                foreach (var vCsvFile in Directory.EnumerateFiles(vCsvFolder, "*.csv"))
+                {
+                    var vFileDate = File.GetLastWriteTime(vCsvFile).Date;
+                    if (vFileDate == vTodayDate)
+                    {
+                        string vCsvDestFile = Path.Combine(vPathDate, Path.GetFileName(vCsvFile));
+                        if (!File.Exists(vCsvDestFile))
+                            File.Copy(vCsvFile, vCsvDestFile);
+                    }
+                }
+
+                // 3. Parse the copied CSV files into SQL
+                CsvParser oCsvParser = new CsvParser(vPathDate, vLogFile, vConnectionString);
+                oCsvParser.ProcessCsvFiles();
+
+                Console.WriteLine("EMS Processing completed successfully.");
+            }
+            catch (Exception oEx)
+            {
+                File.AppendAllText(vLogFile, $"{DateTime.Now} - Fatal Error: {oEx.Message}{Environment.NewLine}");
+                Console.WriteLine($"Unexpected error: {oEx.Message}");
+            }
+        }
+    }
+}
+
+
+
+
+
+
+
+
+using System;
+using System.Collections.Generic;
+using System.Data.SqlClient;
+using System.Globalization;
+using System.IO;
+
+namespace EmsConsole
+{
+    class CsvParser
+    {
+        private readonly string vCsvFolder;
+        private readonly string vLogFile;
+        private readonly string vConnectionString;
+
+        public CsvParser(string vCsvFolder, string vLogFile, string vConnectionString)
+        {
+            this.vCsvFolder = vCsvFolder;
+            this.vLogFile = vLogFile;
+            this.vConnectionString = vConnectionString;
+        }
+
+        public void ProcessCsvFiles()
+        {
+            try
+            {
+                string[] vFiles = Directory.GetFiles(vCsvFolder, "*.csv");
+
+                foreach (string vFile in vFiles)
+                {
+                    try
+                    {
+                        ProcessSingleCsv(vFile);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError($"Error processing file {Path.GetFileName(vFile)}: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error reading CSV folder: {ex.Message}");
+            }
+        }
+
+        private void ProcessSingleCsv(string vFilePath)
+        {
+            string[] vAllLines = File.ReadAllLines(vFilePath);
+            if (vAllLines.Length == 0)
+            {
+                LogError($"Empty file skipped: {Path.GetFileName(vFilePath)}");
+                return;
+            }
+
+            // Find headers dynamically
+            int iGateway = -1, iDevice = -1, iTimestamp = -1, iEnergy = -1, iError = -1;
+            string[] vHeaders = vAllLines[0].Split(',');
+
+            for (int i = 0; i < vHeaders.Length; i++)
+            {
+                string vHeader = vHeaders[i].Trim().ToLower();
+
+                if (vHeader.Contains("Gateway Name")) iGateway = i;
+                if (vHeader.Contains("Device Name")) iDevice = i;
+                if (vHeader.Contains("local time stamp")) iTimestamp = i;
+                if (vHeader.Contains("TotalDeliveredActiveEnergy (Wh)") ||
+                    vHeader.Contains("Active energy (wh)") ||
+                    vHeader.Contains("Active energy delivered (Wh)"))
+                    iEnergy = i;
+                if (vHeader.Contains("error")) iError = i;
+            }
+
+            if (iGateway == -1 || iDevice == -1 || iTimestamp == -1 || iEnergy == -1 || iError == -1)
+            {
+                LogError($"Missing required headers in {Path.GetFileName(vFilePath)}");
+                return;
+            }
+
+            string vGatewayName = "";
+            string vDeviceName = "";
+
+            // Extract first row for device details
+            string[] vFirstDataRow = vAllLines[1].Split(',');
+            vGatewayName = vFirstDataRow[iGateway].Trim();
+            vDeviceName = vFirstDataRow[iDevice].Trim();
+
+            InsertDevice(vGatewayName, vDeviceName);
+
+            // Loop through all rows for energy
+            for (int r = 1; r < vAllLines.Length; r++)
+            {
+                string[] vRow = vAllLines[r].Split(',');
+                if (vRow.Length <= Math.Max(iTimestamp, iEnergy)) continue;
+
+                string vErrorValue = vRow[iError].Trim();
+                if (vErrorValue != "0") continue;
+
+                string vTimestampStr = vRow[iTimestamp].Trim();
+                string vEnergyStr = vRow[iEnergy].Trim();
+
+                if (DateTime.TryParse(vTimestampStr, out DateTime vTimestamp) &&
+                    double.TryParse(vEnergyStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double vEnergyValue))
+                {
+                    InsertEnergy(vDeviceName, vTimestamp, vEnergyValue);
+                }
+                else
+                {
+                    LogError($"Invalid row skipped in {Path.GetFileName(vFilePath)} at line {r + 1}");
+                }
+            }
+        }
+
+        private void InsertDevice(string vGatewayName, string vDeviceName)
+        {
+            using (SqlConnection oConn = new SqlConnection(vConnectionString))
+            {
+                oConn.Open();
+                string vQuery = @"IF NOT EXISTS (SELECT 1 FROM dbo.DeviceRegistry WHERE GatewayName=@GatewayName AND DeviceName=@DeviceName)
+                                  INSERT INTO ems.Device (GatewayName, DeviceName) VALUES (@GatewayName, @DeviceName)";
+                using (SqlCommand oCmd = new SqlCommand(vQuery, oConn))
+                {
+                    oCmd.Parameters.AddWithValue("@GatewayName", vGatewayName);
+                    oCmd.Parameters.AddWithValue("@DeviceName", vDeviceName);
+                    oCmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private void InsertEnergy(string vDeviceName, DateTime vTimestamp, double vEnergyValue)
+        {
+            using (SqlConnection oConn = new SqlConnection(vConnectionString))
+            {
+                oConn.Open();
+                string vQuery = @"INSERT INTO dbo.EnergyReadings (DeviceName, LocalTimestamp, ActiveEnergyDelivetedWh) 
+                                  VALUES (@DeviceName, @LocalTimestamp, @ActiveEnergyDelivetedWh)";
+                using (SqlCommand oCmd = new SqlCommand(vQuery, oConn))
+                {
+                    oCmd.Parameters.AddWithValue("@DeviceName", vDeviceName);
+                    oCmd.Parameters.AddWithValue("@LocalTimestamp", vTimestamp);
+                    oCmd.Parameters.AddWithValue("@ActiveEnergyDelivetedWh", vEnergyValue);
+                    oCmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private void LogError(string vMessage)
+        {
+            File.AppendAllText(vLogFile, $"{DateTime.Now} - {vMessage}{Environment.NewLine}");
+        }
+    }
+}
+
+
+
+
+
+
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+	<appSettings>
+		<!-- Folder containing source CSV files -->
+		<add key="EMS_CsvFolder" value="C:\Users\91862\Desktop\New folder\EmsConsoleApp\EmsCsvFiles" />
+
+		<!-- Root folder for directory structure -->
+		<add key="EMS_DirectoryRoot" value="C:\Users\91862\Desktop\New folder\EmsConsoleApp\EmsDirectory" />
+
+		<!-- Log file path -->
+		<add key="EMS_LogFile" value="C:\Users\91862\Desktop\New folder\EmsConsoleApp\logs.txt" />
+
+		<!-- SQL Connection -->
+		<add key="EMS_SqlConnection" value="Server=.\SQLEXPRESS;Database=EmsDb;User Id=sa;Password=harry@1234;" />
+	</appSettings>
+</configuration>
