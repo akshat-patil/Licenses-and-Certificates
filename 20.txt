@@ -1,3 +1,35 @@
+-- Create Database
+CREATE DATABASE EmsDb;
+GO
+
+USE EmsDb;
+GO
+
+-- Device table
+IF OBJECT_ID('dbo.DeviceRegistry','U') IS NOT NULL DROP TABLE dbo.DeviceRegistry;
+CREATE TABLE dbo.DeviceRegistry
+(
+    DeviceName  NVARCHAR(200) PRIMARY KEY,
+    GatewayName NVARCHAR(200)
+);
+GO
+
+-- Readings table
+IF OBJECT_ID('dbo.EnergyReadings','U') IS NOT NULL DROP TABLE dbo.EnergyReadings;
+CREATE TABLE dbo.EnergyReadings
+(
+    DeviceName              NVARCHAR(200),
+    LocalTimeStamp          DATETIME2,
+    ActiveEnergyDeliveredWh DECIMAL(18,3),
+    FOREIGN KEY (DeviceName) REFERENCES dbo.DeviceRegistry(DeviceName)
+);
+GO
+
+-- Quick checks
+-- SELECT * FROM dbo.DeviceRegistry;
+-- SELECT * FROM dbo.EnergyReadings;
+
+
 using System;
 using System.Configuration;
 using System.IO;
