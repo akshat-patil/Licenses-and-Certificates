@@ -1,454 +1,270 @@
-<?xml version="1.0" encoding="utf-8" ?>
-<configuration>
-  <connectionStrings>
-    <add name="EmsDb"
-         connectionString="Server=.\SQLEXPRESS;Database=ems;User Id=sa;Password=YourPassword;"
-         providerName="System.Data.SqlClient"/>
-  </connectionStrings>
-
-  <appSettings>
-    <add key="vEmsCsvInputFolder" value="C:\EMS\InputCSVs"/>
-    <add key="vEmsCsvArchiveRoot" value="C:\EMS\Archive"/>
-    <add key="vEmsErrorLogFile" value="C:\EMS\Logs\error_log.txt"/>
-  </appSettings>
-</configuration>
-
-
-
-
 using System;
 using System.Configuration;
 using System.IO;
+using ClosedXML.Excel;
+using EmsConsole;
 
-namespace EmsConsole
+namespace CsvToExcelOrganizer
 {
     class Program
     {
         static void Main(string[] args)
         {
-            string vCsvInputFolder = ConfigurationManager.AppSettings["vEmsCsvInputFolder"];
-            string vArchiveRootFolder = ConfigurationManager.AppSettings["vEmsCsvArchiveRoot"];
-            string vLogFile = ConfigurationManager.AppSettings["vEmsErrorLogFile"];
-
             try
             {
-                DateTime vToday = DateTime.Now;
+                string vEmsCsvFiles = ConfigurationManager.AppSettings["CsvFiles"], vEmsDirectory = ConfigurationManager.AppSettings["ExcelFiles"], connectionString = ConfigurationManager.AppSettings["SqlConnectionString"];
+                SqlData sqlData = new SqlData(connectionString);
 
-                // Create Year folder
-                string vYearFolder = Path.Combine(vArchiveRootFolder, vToday.Year.ToString());
-                if (!Directory.Exists(vYearFolder)) Directory.CreateDirectory(vYearFolder);
+                var today = DateTime.Today;
 
-                // Create Month folder
-                string vMonthFolder = Path.Combine(vYearFolder, vToday.ToString("MM"));
-                if (!Directory.Exists(vMonthFolder)) Directory.CreateDirectory(vMonthFolder);
-
-                // Create Date folder
-                string vDateFolder = Path.Combine(vMonthFolder, vToday.ToString("ddMMyyyy"));
-                if (!Directory.Exists(vDateFolder)) Directory.CreateDirectory(vDateFolder);
-
-                // Copy CSVs and process
-                foreach (string vCsvFile in Directory.GetFiles(vCsvInputFolder, "*.csv"))
+                if (!Directory.Exists(vEmsCsvFiles))
                 {
-                    string vDestFile = Path.Combine(vDateFolder, Path.GetFileName(vCsvFile));
-                    File.Copy(vCsvFile, vDestFile, true);
-
-                    Console.WriteLine($"Processing {vCsvFile}...");
-                    CsvParser.ParseAndInsert(vDestFile, vLogFile);
+                    Console.WriteLine($"Source folder not found: {vEmsCsvFiles}");
+                    return;
                 }
-            }
-            catch (Exception oEx)
-            {
-                File.AppendAllText(vLogFile, $"{DateTime.Now}: {oEx.Message}{Environment.NewLine}");
-            }
-        }
-    }
-}
 
+                // Create Year/Month/Date folder structure
+                string path = Path.Combine(vEmsDirectory, today.Year.ToString());
+                Directory.CreateDirectory(path);
 
+                path = Path.Combine(path, today.ToString("MM"));
+                Directory.CreateDirectory(path);
 
-using System;
-using System.Configuration;
-using System.Data.SqlClient;
-using System.Globalization;
-using System.IO;
-using System.Linq;
+                string dateFolderPath = Path.Combine(path, today.ToString("ddMMyyyy"));
+                Directory.CreateDirectory(dateFolderPath);
 
-namespace EmsConsole
-{
-    public static class CsvParser
-    {
-        public static void ParseAndInsert(string vCsvFilePath, string vLogFile)
-        {
-            try
-            {
-                string vConnectionString = ConfigurationManager.ConnectionStrings["EmsDb"].ConnectionString;
-
-                using (SqlConnection oSqlConn = new SqlConnection(vConnectionString))
+                // Copy today's CSV files
+                foreach (var oFilePath in Directory.EnumerateFiles(vEmsCsvFiles, "*.csv"))
                 {
-                    oSqlConn.Open();
-                    string[] vAllLines = File.ReadAllLines(vCsvFilePath);
-
-                    if (vAllLines.Length < 2) return;
-
-                    // Read header to find column indexes
-                    string[] vHeader = vAllLines[0].Split(',');
-
-                    int vGatewayCol = Array.FindIndex(vHeader, h => h.Equals("Gateway Name", StringComparison.OrdinalIgnoreCase));
-                    int vDeviceCol = Array.FindIndex(vHeader, h => h.Equals("Device Name", StringComparison.OrdinalIgnoreCase));
-                    int vTimestampCol = Array.FindIndex(vHeader, h => h.Equals("Local TimeStamp", StringComparison.OrdinalIgnoreCase));
-                    int vEnergyCol = Array.FindIndex(vHeader, h =>
-                        h.Equals("TotalDeliveredActiveEnergy (Wh)", StringComparison.OrdinalIgnoreCase) ||
-                        h.Equals("Active energy (Wh)", StringComparison.OrdinalIgnoreCase) ||
-                        h.Equals("Active energy delivered (Wh)", StringComparison.OrdinalIgnoreCase));
-
-                    for (int i = 1; i < vAllLines.Length; i++)
+                    var fileDate = File.GetLastWriteTime(oFilePath).Date;
+                    if (fileDate == today)
                     {
-                        try
+                        string vDirectoryPath = Path.Combine(dateFolderPath, Path.GetFileName(oFilePath));
+                        if (!File.Exists(vDirectoryPath))
+                            File.Copy(oFilePath, vDirectoryPath);
+                    }
+                }
+
+                // Convert CSV → Excel
+                foreach (var oCsvFile in Directory.EnumerateFiles(dateFolderPath, "*.csv"))
+                {
+                    string excelFilePath = Path.ChangeExtension(oCsvFile, ".xlsx");
+                    if (!File.Exists(excelFilePath))
+                    {
+                        using (var workbook = new XLWorkbook())
                         {
-                            string[] vParts = vAllLines[i].Split(',');
-
-                            string vGatewayName = vGatewayCol >= 0 && vParts.Length > vGatewayCol ? vParts[vGatewayCol] : null;
-                            string vDeviceName = vDeviceCol >= 0 && vParts.Length > vDeviceCol ? vParts[vDeviceCol] : null;
-
-                            DateTime? vTimestamp = null;
-                            if (vTimestampCol >= 0 && vParts.Length > vTimestampCol && DateTime.TryParse(vParts[vTimestampCol], out DateTime vTs))
-                                vTimestamp = vTs;
-
-                            decimal? vEnergy = null;
-                            if (vEnergyCol >= 0 && vParts.Length > vEnergyCol && decimal.TryParse(vParts[vEnergyCol], NumberStyles.Any, CultureInfo.InvariantCulture, out decimal vVal))
-                                vEnergy = vVal;
-
-                            int vDeviceId = InsertOrGetDevice(oSqlConn, vGatewayName, vDeviceName);
-
-                            using (SqlCommand oCmd = new SqlCommand(
-                                "INSERT INTO ems.EnergyReadings (DeviceId, LocalTimestamp, ActiveDeliveredEnergy) VALUES (@DeviceId, @LocalTimestamp, @Energy)", oSqlConn))
+                            var worksheet = workbook.Worksheets.Add("Sheet1");
+                            int row = 1;
+                            using (var reader = new StreamReader(oCsvFile))
                             {
-                                oCmd.Parameters.AddWithValue("@DeviceId", (object)vDeviceId ?? DBNull.Value);
-                                oCmd.Parameters.AddWithValue("@LocalTimestamp", (object)vTimestamp ?? DBNull.Value);
-                                oCmd.Parameters.AddWithValue("@Energy", (object)vEnergy ?? DBNull.Value);
-                                oCmd.ExecuteNonQuery();
+                                while (!reader.EndOfStream)
+                                {
+                                    var values = reader.ReadLine().Split(',');
+                                    for (int col = 0; col < values.Length; col++)
+                                        worksheet.Cell(row, col + 1).Value = values[col];
+                                    row++;
+                                }
                             }
-                        }
-                        catch (Exception oInnerEx)
-                        {
-                            File.AppendAllText(vLogFile, $"{DateTime.Now}: Error in line {i + 1}: {oInnerEx.Message}{Environment.NewLine}");
+                            workbook.SaveAs(excelFilePath);
                         }
                     }
+
+                    // Insert Excel data into SQL
+                    try
+                    {
+                        sqlData.ProcessFile(excelFilePath);
+                    }
+                    catch (Exception o)
+                    {
+                        Console.WriteLine($"Error inserting SQL for {excelFilePath}: {o.Message}");
+                    }
                 }
-            }
-            catch (Exception oEx)
-            {
-                File.AppendAllText(vLogFile, $"{DateTime.Now}: {oEx.Message}{Environment.NewLine}");
-            }
-        }
 
-        private static int InsertOrGetDevice(SqlConnection oSqlConn, string vGatewayName, string vDeviceName)
-        {
-            using (SqlCommand oCheckCmd = new SqlCommand(
-                "SELECT DeviceId FROM ems.Device WHERE GatewayName = @GatewayName AND DeviceName = @DeviceName", oSqlConn))
-            {
-                oCheckCmd.Parameters.AddWithValue("@GatewayName", (object)vGatewayName ?? DBNull.Value);
-                oCheckCmd.Parameters.AddWithValue("@DeviceName", (object)vDeviceName ?? DBNull.Value);
-
-                object oResult = oCheckCmd.ExecuteScalar();
-                if (oResult != null) return (int)oResult;
+                Console.WriteLine("All processing completed successfully.");
             }
-
-            using (SqlCommand oInsertCmd = new SqlCommand(
-                "INSERT INTO ems.Device (GatewayName, DeviceName) OUTPUT INSERTED.DeviceId VALUES (@GatewayName, @DeviceName)", oSqlConn))
+            catch (Exception o)
             {
-                oInsertCmd.Parameters.AddWithValue("@GatewayName", (object)vGatewayName ?? DBNull.Value);
-                oInsertCmd.Parameters.AddWithValue("@DeviceName", (object)vDeviceName ?? DBNull.Value);
-                return (int)oInsertCmd.ExecuteScalar();
+                Console.WriteLine($"Unexpected error: {o.Message}");
             }
         }
     }
 }
-
-
-
+-------------------------------------------
 
 using System;
-using System.Configuration;
 using System.Data.SqlClient;
-using System.Globalization;
-using System.IO;
-using System.Linq;
+using ClosedXML.Excel;
 
 namespace EmsConsole
 {
-    public static class CsvParser
+    public class SqlData
     {
-        public static void ParseAndInsert(string vCsvFilePath, string vLogFile)
+        private readonly string _connectionString;
+
+        public SqlData(string connectionString)
         {
-            try
+            _connectionString = connectionString;
+        }
+
+        public void ProcessFile(string excelFilePath)
+        {
+            using (var workbook = new XLWorkbook(excelFilePath))
             {
-                string vConnectionString = ConfigurationManager.ConnectionStrings["EmsDb"].ConnectionString;
+                var worksheet = workbook.Worksheet(1);
 
-                string[] vAllLines = File.ReadAllLines(vCsvFilePath);
-                if (vAllLines.Length < 2)
+                // --- Find GatewayName & DeviceName ---
+                string gatewayName = FindSingleValue(worksheet, "Gateway Name");
+                string deviceName = FindSingleValue(worksheet, "Device Name");
+
+                if (string.IsNullOrWhiteSpace(gatewayName) || string.IsNullOrWhiteSpace(deviceName))
                 {
-                    File.AppendAllText(vLogFile, $"{DateTime.Now}: File too short: {vCsvFilePath}{Environment.NewLine}");
+                    Console.WriteLine($"Skipping {excelFilePath}, missing Gateway/Device");
                     return;
                 }
 
-                // Helper to clean headers
-                string Clean(string s) => s.Trim().Trim('"');
+                int deviceId = InsertDevice(gatewayName, deviceName);
 
-                // ======= Step 1: Detect Gateway & Device =======
-                string[] vHeaderRow = vAllLines[0].Split(',');
-                string[] vValueRow = vAllLines[1].Split(',');
+                // --- Find multiple value columns ---
+                int tsCol = FindColumn(worksheet, "Local Time Stamp");
+                int energyCol = FindColumn(worksheet, "TotalDeliveredActiveEnergy (Wh)", "TotalActiveDeliveredEnergy (Wh)", "Active energy delivered (Wh)");
+                int errorCol = FindColumn(worksheet, "Error");
 
-                int vGatewayCol = Array.FindIndex(vHeaderRow, h => Clean(h).Equals("Gateway Name", StringComparison.OrdinalIgnoreCase));
-                int vDeviceCol = Array.FindIndex(vHeaderRow, h => Clean(h).Equals("Device Name", StringComparison.OrdinalIgnoreCase));
-
-                string vGatewayName = vGatewayCol >= 0 && vValueRow.Length > vGatewayCol ? vValueRow[vGatewayCol] : null;
-                string vDeviceName = vDeviceCol >= 0 && vValueRow.Length > vDeviceCol ? vValueRow[vDeviceCol] : null;
-
-                if (vGatewayName == null || vDeviceName == null)
+                if (tsCol == -1 || energyCol == -1 || errorCol == -1)
                 {
-                    File.AppendAllText(vLogFile, $"{DateTime.Now}: Could not detect Gateway or Device in {vCsvFilePath}{Environment.NewLine}");
+                    Console.WriteLine($"Skipping {excelFilePath}, missing required data columns.");
                     return;
                 }
 
-                // ======= Step 2: Detect Data Header =======
-                // Find the row where timestamp and energy columns exist
-                int vDataHeaderRowIndex = Array.FindIndex(vAllLines, line =>
+                int startRow = FindHeaderRow(worksheet, "Local Time Stamp"); // header row index
+                int row = startRow + 1;
+
+                using (var conn = new SqlConnection(_connectionString))
                 {
-                    string[] parts = line.Split(',');
-                    return parts.Any(p => Clean(p).Equals("Local TimeStamp", StringComparison.OrdinalIgnoreCase));
-                });
+                    conn.Open();
 
-                if (vDataHeaderRowIndex < 0)
-                {
-                    File.AppendAllText(vLogFile, $"{DateTime.Now}: Could not find data header in {vCsvFilePath}{Environment.NewLine}");
-                    return;
-                }
-
-                string[] vDataHeader = vAllLines[vDataHeaderRowIndex].Split(',');
-
-                int vTimestampCol = Array.FindIndex(vDataHeader, h => Clean(h).Equals("Local TimeStamp", StringComparison.OrdinalIgnoreCase));
-                int vEnergyCol = Array.FindIndex(vDataHeader, h =>
-                    Clean(h).Equals("TotalDeliveredActiveEnergy (Wh)", StringComparison.OrdinalIgnoreCase) ||
-                    Clean(h).Equals("Active energy (Wh)", StringComparison.OrdinalIgnoreCase) ||
-                    Clean(h).Equals("Active energy delivered (Wh)", StringComparison.OrdinalIgnoreCase));
-
-                if (vTimestampCol < 0 || vEnergyCol < 0)
-                {
-                    File.AppendAllText(vLogFile, $"{DateTime.Now}: Could not detect Timestamp or Energy column in {vCsvFilePath}{Environment.NewLine}");
-                    return;
-                }
-
-                // ======= Step 3: Insert into SQL =======
-                using (SqlConnection oSqlConn = new SqlConnection(vConnectionString))
-                {
-                    oSqlConn.Open();
-
-                    int vDeviceId = InsertOrGetDevice(oSqlConn, vGatewayName, vDeviceName);
-
-                    for (int i = vDataHeaderRowIndex + 1; i < vAllLines.Length; i++)
+                    while (!worksheet.Cell(row, tsCol).IsEmpty())
                     {
-                        try
-                        {
-                            string[] vParts = vAllLines[i].Split(',');
+                        string timestamp = worksheet.Cell(row, tsCol).GetValue<string>();
+                        string energy = worksheet.Cell(row, energyCol).GetValue<string>();
+                        string error = worksheet.Cell(row, errorCol).GetValue<string>();
 
-                            DateTime? vTimestamp = null;
-                            decimal? vEnergy = null;
-
-                            if (vParts.Length > vTimestampCol && DateTime.TryParse(vParts[vTimestampCol], out DateTime ts))
-                                vTimestamp = ts;
-
-                            if (vParts.Length > vEnergyCol && decimal.TryParse(vParts[vEnergyCol], NumberStyles.Any, CultureInfo.InvariantCulture, out decimal en))
-                                vEnergy = en;
-
-                            // Skip if both timestamp and energy are null
-                            if (vTimestamp == null && vEnergy == null) continue;
-
-                            using (SqlCommand oCmd = new SqlCommand(
-                                "INSERT INTO ems.EnergyReadings (DeviceId, LocalTimestamp, ActiveDeliveredEnergy) VALUES (@DeviceId, @LocalTimestamp, @Energy)", oSqlConn))
-                            {
-                                oCmd.Parameters.AddWithValue("@DeviceId", vDeviceId);
-                                oCmd.Parameters.AddWithValue("@LocalTimestamp", (object)vTimestamp ?? DBNull.Value);
-                                oCmd.Parameters.AddWithValue("@Energy", (object)vEnergy ?? DBNull.Value);
-                                oCmd.ExecuteNonQuery();
-                            }
-                        }
-                        catch (Exception oInnerEx)
-                        {
-                            File.AppendAllText(vLogFile, $"{DateTime.Now}: Row {i + 1} error: {oInnerEx.Message}{Environment.NewLine}");
-                        }
+                        InsertEnergyReading(conn, deviceId, timestamp, energy, error);
+                        row++;
                     }
                 }
-
-                File.AppendAllText(vLogFile, $"{DateTime.Now}: Successfully processed {vCsvFilePath}{Environment.NewLine}");
-            }
-            catch (Exception oEx)
-            {
-                File.AppendAllText(vLogFile, $"{DateTime.Now}: General error in file {vCsvFilePath}: {oEx.Message}{Environment.NewLine}");
             }
         }
 
-        private static int InsertOrGetDevice(SqlConnection oSqlConn, string vGatewayName, string vDeviceName)
+        // Find a single-value header (e.g., Gateway Name, Device Name) and return value below it
+        private string FindSingleValue(IXLWorksheet ws, string header)
         {
-            using (SqlCommand oCheckCmd = new SqlCommand(
-                "SELECT DeviceId FROM ems.Device WHERE GatewayName=@GatewayName AND DeviceName=@DeviceName", oSqlConn))
+            foreach (var cell in ws.CellsUsed())
             {
-                oCheckCmd.Parameters.AddWithValue("@GatewayName", (object)vGatewayName ?? DBNull.Value);
-                oCheckCmd.Parameters.AddWithValue("@DeviceName", (object)vDeviceName ?? DBNull.Value);
-
-                object oResult = oCheckCmd.ExecuteScalar();
-                if (oResult != null) return (int)oResult;
-            }
-
-            using (SqlCommand oInsertCmd = new SqlCommand(
-                "INSERT INTO ems.Device (GatewayName, DeviceName) OUTPUT INSERTED.DeviceId VALUES (@GatewayName, @DeviceName)", oSqlConn))
-            {
-                oInsertCmd.Parameters.AddWithValue("@GatewayName", (object)vGatewayName ?? DBNull.Value);
-                oInsertCmd.Parameters.AddWithValue("@DeviceName", (object)vDeviceName ?? DBNull.Value);
-                return (int)oInsertCmd.ExecuteScalar();
-            }
-        }
-    }
-}
-
-
-
-
-
-
-
-
-
-
-
-
-using System;
-using System.Collections.Generic;
-using System.Configuration;
-using System.Data.SqlClient;
-using System.Globalization;
-using System.IO;
-using System.Linq;
-
-namespace EmsConsole
-{
-    class CsvParser
-    {
-        public static void ParseAndInsert(string csvFile, string logFile)
-        {
-            try
-            {
-                var allLines = File.ReadAllLines(csvFile);
-                if (allLines.Length == 0) return;
-
-                // find header row
-                int headerRowIndex = -1;
-                string[] headers = null;
-
-                for (int i = 0; i < allLines.Length; i++)
+                if (cell.GetValue<string>().Trim().Equals(header, StringComparison.OrdinalIgnoreCase))
                 {
-                    var cols = allLines[i].Split(',').Select(x => x.Trim()).ToArray();
-                    if (cols.Any(c => c.Equals("Gateway Name", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        headers = cols;
-                        headerRowIndex = i;
-                        break;
-                    }
+                    return cell.Worksheet.Cell(cell.Address.RowNumber + 1, cell.Address.ColumnNumber).GetValue<string>().Trim();
                 }
-
-                if (headers == null) throw new Exception("Header row not found in CSV file: " + csvFile);
-
-                // column indexes
-                int gatewayIndex = Array.FindIndex(headers, h => h.Equals("Gateway Name", StringComparison.OrdinalIgnoreCase));
-                int deviceIndex = Array.FindIndex(headers, h => h.Equals("Device Name", StringComparison.OrdinalIgnoreCase));
-                int timeIndex = Array.FindIndex(headers, h => h.Equals("Local Time Stamp", StringComparison.OrdinalIgnoreCase));
-                int energyIndex = Array.FindIndex(headers, h =>
-                    h.Equals("TotalDeliveredActiveEnergy (Wh)", StringComparison.OrdinalIgnoreCase) ||
-                    h.Equals("Active energy (Wh)", StringComparison.OrdinalIgnoreCase) ||
-                    h.Equals("Active energy delivered (Wh)", StringComparison.OrdinalIgnoreCase));
-
-                if (gatewayIndex == -1 || deviceIndex == -1 || timeIndex == -1 || energyIndex == -1)
-                    throw new Exception("Required columns not found in " + csvFile);
-
-                // Gateway and Device (from first data row after header)
-                string gatewayName = allLines[headerRowIndex + 1].Split(',')[gatewayIndex].Trim();
-                string deviceName = allLines[headerRowIndex + 1].Split(',')[deviceIndex].Trim();
-
-                // Parse multiple records
-                List<(DateTime LocalTime, double Energy)> records = new List<(DateTime, double)>();
-
-                for (int i = headerRowIndex + 1; i < allLines.Length; i++)
-                {
-                    var cols = allLines[i].Split(',').Select(x => x.Trim()).ToArray();
-                    if (cols.Length <= Math.Max(timeIndex, energyIndex)) continue;
-
-                    if (DateTime.TryParse(cols[timeIndex], out DateTime localTime) &&
-                        double.TryParse(cols[energyIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out double energyValue))
-                    {
-                        records.Add((localTime, energyValue));
-                    }
-                }
-
-                // Save to DB
-                InsertIntoDatabase(gatewayName, deviceName, records);
             }
-            catch (Exception ex)
-            {
-                File.AppendAllText(logFile, $"{DateTime.Now}: {ex.Message}{Environment.NewLine}");
-            }
+            return null;
         }
 
-        private static void InsertIntoDatabase(string gateway, string device, List<(DateTime LocalTime, double Energy)> records)
+        // Find the row index of a header
+        private int FindHeaderRow(IXLWorksheet ws, string header)
         {
-            string connectionString = ConfigurationManager.ConnectionStrings["EmsDb"].ConnectionString;
+            foreach (var cell in ws.CellsUsed())
+            {
+                if (cell.GetValue<string>().Trim().Equals(header, StringComparison.OrdinalIgnoreCase))
+                    return cell.Address.RowNumber;
+            }
+            return -1;
+        }
 
-            using (SqlConnection conn = new SqlConnection(connectionString))
+        // Find column index of a header
+        // Updated FindColumn method that supports multiple possible headers
+        private int FindColumn(IXLWorksheet ws, params string[] headers)
+        {
+            foreach (var cell in ws.CellsUsed())
+            {
+                string cellValue = cell.GetValue<string>().Trim();
+                foreach (var header in headers)
+                {
+                    if (cellValue.Equals(header, StringComparison.OrdinalIgnoreCase))
+                        return cell.Address.ColumnNumber;
+                }
+            }
+            return -1;
+        }
+
+
+        // Insert device if not exists, return DeviceId
+        private int InsertDevice(string gateway, string device)
+        {
+            using (var conn = new SqlConnection(_connectionString))
             {
                 conn.Open();
 
-                // Check if Device already exists
-                int deviceId;
-                string checkDeviceSql = "SELECT DeviceId FROM ems.Device WHERE GatewayName = @GatewayName AND DeviceName = @DeviceName";
+                string sql = @"
+                    IF NOT EXISTS (SELECT 1 FROM ems.Device WHERE GatewayName=@g AND DeviceName=@d)
+                    BEGIN
+                        INSERT INTO ems.Device(GatewayName, DeviceName) VALUES(@g,@d);
+                    END
+                    SELECT DeviceId FROM ems.Device WHERE GatewayName=@g AND DeviceName=@d;";
 
-                using (SqlCommand cmd = new SqlCommand(checkDeviceSql, conn))
+                using (var cmd = new SqlCommand(sql, conn))
                 {
-                    cmd.Parameters.AddWithValue("@GatewayName", gateway);
-                    cmd.Parameters.AddWithValue("@DeviceName", device);
-
-                    var result = cmd.ExecuteScalar();
-                    if (result != null)
-                    {
-                        deviceId = Convert.ToInt32(result);
-                    }
-                    else
-                    {
-                        // Insert new device
-                        string insertDeviceSql = "INSERT INTO ems.Device (GatewayName, DeviceName) OUTPUT INSERTED.DeviceId VALUES (@GatewayName, @DeviceName)";
-                        using (SqlCommand insertCmd = new SqlCommand(insertDeviceSql, conn))
-                        {
-                            insertCmd.Parameters.AddWithValue("@GatewayName", gateway);
-                            insertCmd.Parameters.AddWithValue("@DeviceName", device);
-                            deviceId = (int)insertCmd.ExecuteScalar();
-                        }
-                    }
+                    cmd.Parameters.AddWithValue("@g", gateway);
+                    cmd.Parameters.AddWithValue("@d", device);
+                    return (int)cmd.ExecuteScalar();
                 }
+            }
+        }
 
-                // Insert Energy Readings
-                string insertReadingSql = @"
-                    INSERT INTO ems.EnergyReadings (DeviceId, LocalTimestamp, ActiveEnergyDeliveted)
-                    VALUES (@DeviceId, @LocalTimestamp, @ActiveEnergyDeliveted)";
+        // Insert readings into EnergyReadings
+        private void InsertEnergyReading(SqlConnection conn, int deviceId, string ts, string energy, string error)
+        {
+            string sql = @"INSERT INTO ems.EnergyReadings (DeviceId, LocalTimestamp, ActiveEnergyDelivered, Error) 
+                           VALUES (@id,@ts,@energy,@err)";
 
-                foreach (var record in records)
-                {
-                    using (SqlCommand cmd = new SqlCommand(insertReadingSql, conn))
-                    {
-                        cmd.Parameters.AddWithValue("@DeviceId", deviceId);
-                        cmd.Parameters.AddWithValue("@LocalTimestamp", record.LocalTime);
-                        cmd.Parameters.AddWithValue("@ActiveEnergyDeliveted", record.Energy);
-                        cmd.ExecuteNonQuery();
-                    }
-                }
+            using (var cmd = new SqlCommand(sql, conn))
+            {
+                cmd.Parameters.AddWithValue("@id", deviceId);
+                cmd.Parameters.AddWithValue("@ts", ts ?? "");
+                cmd.Parameters.AddWithValue("@energy", energy ?? "");
+                cmd.Parameters.AddWithValue("@err", error ?? "");
+                cmd.ExecuteNonQuery();
             }
         }
     }
 }
+---------------------------------------------
+
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+	<appSettings>
+		<add key="CsvFiles" value="C:\Users\91862\Desktop\EMS\EmsConsoleApp\EmsCsvFiles" />
+		<add key="ExcelFiles" value="C:\Users\91862\Desktop\EMS\EmsConsoleApp\EmsDirectory" />
+		<add key="SqlConnectionString" value="Server=.\SQLEXPRESS;Database=EmsDb;User Id=sa;Password=harry@1234;" />
+	</appSettings>
+	<runtime>
+		<assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">
+			<dependentAssembly>
+				<assemblyIdentity name="System.Runtime.CompilerServices.Unsafe" publicKeyToken="b03f5f7f11d50a3a" culture="neutral" />
+				<bindingRedirect oldVersion="0.0.0.0-4.0.6.0" newVersion="4.0.6.0" />
+			</dependentAssembly>
+			<dependentAssembly>
+				<assemblyIdentity name="System.Memory" publicKeyToken="cc7b13ffcd2ddd51" culture="neutral" />
+				<bindingRedirect oldVersion="0.0.0.0-4.0.1.2" newVersion="4.0.1.2" />
+			</dependentAssembly>
+			<dependentAssembly>
+				<assemblyIdentity name="System.Numerics.Vectors" publicKeyToken="b03f5f7f11d50a3a" culture="neutral" />
+				<bindingRedirect oldVersion="0.0.0.0-4.1.4.0" newVersion="4.1.4.0" />
+			</dependentAssembly>
+			<dependentAssembly>
+				<assemblyIdentity name="System.Buffers" publicKeyToken="cc7b13ffcd2ddd51" culture="neutral" />
+				<bindingRedirect oldVersion="0.0.0.0-4.0.3.0" newVersion="4.0.3.0" />
+			</dependentAssembly>
+		</assemblyBinding>
+	</runtime>
+</configuration>
+
+--------------------------------------------
