@@ -151,3 +151,180 @@ class Program
         return null;
     }
 }
+
+
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using ClosedXML.Excel;
+
+class Program
+{
+    static void Main(string[] args)
+    {
+        // <-- CHANGE THESE PATHS -->
+        string inputPath  = @"C:\Path\to\hourly 1.xlsx";
+        string outputPath = @"C:\Path\to\hourly_with_yAEC.xlsx";
+
+        // Open workbook with classic using block (C# 7.3 compatible)
+        using (XLWorkbook wb = new XLWorkbook(inputPath))
+        {
+            IXLWorksheet ws = wb.Worksheet(1);
+
+            int headerRow = 1;
+            int deviceCol = FindColumn(ws, headerRow, "DeviceId");
+            int tsCol     = FindColumn(ws, headerRow, "Local Time Stamp");
+            int aedCol    = FindColumn(ws, headerRow, "AED");
+
+            if (tsCol == 0 || aedCol == 0)
+            {
+                Console.WriteLine("ERROR: Could not find headers 'Local Time Stamp' and/or 'AED' on row 1.");
+                return;
+            }
+
+            int yAECCol = 7; // column G
+            ws.Cell(headerRow, yAECCol).Value = "y_AEC";
+
+            int lastRow = ws.LastRowUsed().RowNumber();
+
+            // Build dictionary: (Device|TimestampString) -> AED
+            var aedMap = new Dictionary<string, double>();
+            for (int r = headerRow + 1; r <= lastRow; r++)
+            {
+                DateTime? ts = GetDateTimeFlexible(ws.Cell(r, tsCol));
+                if (!ts.HasValue) continue;
+
+                string device = deviceCol > 0 ? ws.Cell(r, deviceCol).GetString().Trim() : "";
+                double? aed = GetDoubleFlexible(ws.Cell(r, aedCol));
+                if (!aed.HasValue) continue;
+
+                string key = MapKey(device, ts.Value);
+                if (!aedMap.ContainsKey(key))
+                    aedMap[key] = aed.Value;
+            }
+
+            // Compute y_AEC for each row
+            for (int r = headerRow + 1; r <= lastRow; r++)
+            {
+                DateTime? ts = GetDateTimeFlexible(ws.Cell(r, tsCol));
+                if (!ts.HasValue)
+                {
+                    ws.Cell(r, yAECCol).Clear();
+                    continue;
+                }
+
+                string device = deviceCol > 0 ? ws.Cell(r, deviceCol).GetString().Trim() : "";
+
+                DateTime prevDaySameHour = ts.Value.AddDays(-1);
+                DateTime currentPrevHour = ts.Value.AddHours(-1);
+
+                double v1, v2;
+                if (TryGetAED(aedMap, device, prevDaySameHour, out v1) &&
+                    TryGetAED(aedMap, device, currentPrevHour, out v2))
+                {
+                    ws.Cell(r, yAECCol).Value = v1 - v2;
+                }
+                else
+                {
+                    ws.Cell(r, yAECCol).Clear(); // leave blank when missing
+                }
+            }
+
+            wb.SaveAs(outputPath);
+        } // workbook disposed here
+
+        Console.WriteLine("Done. Saved to: " + outputPath);
+    }
+
+    // ---------- helpers ----------
+
+    static int FindColumn(IXLWorksheet ws, int headerRow, string headerName)
+    {
+        IXLColumn lastCol = ws.LastColumnUsed();
+        if (lastCol == null) return 0;
+        int lastColNum = lastCol.ColumnNumber();
+
+        for (int c = 1; c <= lastColNum; c++)
+        {
+            if (string.Equals(ws.Cell(headerRow, c).GetString().Trim(), headerName,
+                              StringComparison.OrdinalIgnoreCase))
+                return c;
+        }
+        return 0;
+    }
+
+    static string MapKey(string device, DateTime ts)
+    {
+        return (device ?? "") + "|" + ts.ToString("yyyy-MM-dd HH:mm:ss");
+    }
+
+    static bool TryGetAED(Dictionary<string, double> map, string device, DateTime ts, out double value)
+    {
+        return map.TryGetValue(MapKey(device, ts), out value);
+    }
+
+    static DateTime? GetDateTimeFlexible(IXLCell cell)
+    {
+        try
+        {
+            if (cell == null) return null;
+
+            // Excel native datetime
+            if (cell.DataType == XLDataType.DateTime)
+                return cell.GetDateTime();
+
+            // Excel serial number stored as number
+            if (cell.DataType == XLDataType.Number)
+            {
+                double n = cell.GetDouble();
+                if (n > 0 && n < 600000) // simple guard for OADate
+                    return DateTime.FromOADate(n);
+            }
+
+            string s = cell.GetString().Trim();
+            if (string.IsNullOrEmpty(s)) return null;
+
+            string[] formats = {
+                "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd H:mm:ss",
+                "M/d/yyyy H:mm", "M/d/yyyy HH:mm",
+                "dd-MM-yyyy HH:mm:ss", "dd/MM/yyyy HH:mm:ss",
+                "yyyy/MM/dd HH:mm:ss"
+            };
+            DateTime dt;
+            if (DateTime.TryParseExact(s, formats, CultureInfo.InvariantCulture,
+                                       DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeLocal,
+                                       out dt))
+                return dt;
+
+            // If text is a numeric OADate string
+            double oa;
+            if (double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out oa))
+                return DateTime.FromOADate(oa);
+        }
+        catch
+        {
+            // swallow errors and return null
+        }
+        return null;
+    }
+
+    static double? GetDoubleFlexible(IXLCell cell)
+    {
+        try
+        {
+            if (cell == null) return null;
+            if (cell.DataType == XLDataType.Number)
+                return cell.GetDouble();
+
+            string s = cell.GetString().Trim();
+            if (string.IsNullOrEmpty(s)) return null;
+
+            double v;
+            if (double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out v))
+                return v;
+        }
+        catch { }
+        return null;
+    }
+}
