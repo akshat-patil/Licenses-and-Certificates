@@ -1,61 +1,153 @@
 using System;
-using System.IO;
+using System.Collections.Generic;
+using System.Globalization;
 using ClosedXML.Excel;
 
 class Program
 {
-    static void Main(string[] args)
+    static void Main()
     {
-        string inputPath = @"C:\Users\YourName\Desktop\hourly 1.xlsx";   // Change this path
-        string outputPath = @"C:\Users\YourName\Desktop\hourly_with_yAEC.xlsx";
+        // TODO: change these paths
+        string inputPath  = @"C:\Path\to\hourly 1.xlsx";
+        string outputPath = @"C:\Path\to\hourly_with_yAEC.xlsx";
 
-        using (var workbook = new XLWorkbook(inputPath))
+        using var wb = new XLWorkbook(inputPath);
+        var ws = wb.Worksheet(1);
+
+        // --- locate columns by header names on row 1 ---
+        int headerRow = 1;
+        int deviceCol = FindColumn(ws, headerRow, "DeviceId");
+        int tsCol     = FindColumn(ws, headerRow, "Local Time Stamp");
+        int aedCol    = FindColumn(ws, headerRow, "AED");
+        if (tsCol == 0 || aedCol == 0)
+            throw new Exception("Headers not found. Make sure 'Local Time Stamp' and 'AED' exist on row 1.");
+
+        int yAECCol = 7; // Column G as requested
+        ws.Cell(headerRow, yAECCol).Value = "y_AEC";
+
+        int lastRow = ws.LastRowUsed().RowNumber();
+
+        // --- build map: (DeviceId|Timestamp) -> AED ---
+        var aedMap = new Dictionary<string, double>();
+        for (int r = headerRow + 1; r <= lastRow; r++)
         {
-            var ws = workbook.Worksheet(1); // first sheet
+            var ts = GetDateTimeFlexible(ws.Cell(r, tsCol));
+            if (ts == null) continue;
 
-            int lastRow = ws.LastRowUsed().RowNumber();
-            int tsCol = 2; // Local Time Stamp column (B)
-            int aedCol = 3; // AED column (C)
-            int yAECCol = 7; // G column (new one)
+            string device = deviceCol > 0 ? ws.Cell(r, deviceCol).GetString().Trim() : "";
+            var aed = GetDoubleFlexible(ws.Cell(r, aedCol));
+            if (aed == null) continue;
 
-            ws.Cell(1, yAECCol).Value = "y_AEC"; // header
-
-            for (int row = 2; row <= lastRow; row++)
-            {
-                DateTime currentTs = ws.Cell(row, tsCol).GetDateTime();
-
-                DateTime prevDaySameHour = currentTs.AddDays(-1);
-                DateTime prevDayPrevHour = prevDaySameHour.AddHours(-1);
-
-                double? prevDaySameHourAED = FindAED(ws, tsCol, aedCol, prevDaySameHour, lastRow);
-                double? prevDayPrevHourAED = FindAED(ws, tsCol, aedCol, prevDayPrevHour, lastRow);
-
-                if (prevDaySameHourAED.HasValue && prevDayPrevHourAED.HasValue)
-                {
-                    ws.Cell(row, yAECCol).Value = prevDaySameHourAED.Value - prevDayPrevHourAED.Value;
-                }
-                else
-                {
-                    ws.Cell(row, yAECCol).Value = ""; // leave blank if missing
-                }
-            }
-
-            workbook.SaveAs(outputPath);
+            string key = MapKey(device, ts.Value);
+            if (!aedMap.ContainsKey(key))
+                aedMap[key] = aed.Value;
         }
 
-        Console.WriteLine("Done! File saved at: " + outputPath);
+        // --- compute y_AEC for each row ---
+        for (int r = headerRow + 1; r <= lastRow; r++)
+        {
+            var ts = GetDateTimeFlexible(ws.Cell(r, tsCol));
+            if (ts == null) { ws.Cell(r, yAECCol).Clear(); continue; }
+
+            string device = deviceCol > 0 ? ws.Cell(r, deviceCol).GetString().Trim() : "";
+
+            // Per your example:
+            // y_AEC(t) = AED(prev day same hour) - AED(current day previous hour)
+            DateTime prevDaySameHour   = ts.Value.AddDays(-1);
+            DateTime currentPrevHour   = ts.Value.AddHours(-1);
+
+            if (TryGetAED(aedMap, device, prevDaySameHour, out double v1) &&
+                TryGetAED(aedMap, device, currentPrevHour, out double v2))
+            {
+                ws.Cell(r, yAECCol).Value = v1 - v2;
+            }
+            else
+            {
+                ws.Cell(r, yAECCol).Clear(); // leave blank if either value missing
+            }
+        }
+
+        wb.SaveAs(outputPath);
+        Console.WriteLine("Done: " + outputPath);
     }
 
-    static double? FindAED(IXLWorksheet ws, int tsCol, int aedCol, DateTime targetTs, int lastRow)
+    // ---------- helpers ----------
+
+    static int FindColumn(IXLWorksheet ws, int headerRow, string headerName)
     {
-        for (int r = 2; r <= lastRow; r++)
+        var lastCol = ws.LastColumnUsed().ColumnNumber();
+        for (int c = 1; c <= lastCol; c++)
         {
-            DateTime ts = ws.Cell(r, tsCol).GetDateTime();
-            if (ts == targetTs)
-            {
-                return ws.Cell(r, aedCol).GetDouble();
-            }
+            if (string.Equals(ws.Cell(headerRow, c).GetString().Trim(), headerName,
+                              StringComparison.OrdinalIgnoreCase))
+                return c;
         }
+        return 0;
+    }
+
+    static string MapKey(string device, DateTime ts) =>
+        (device ?? "") + "|" + ts.ToString("yyyy-MM-dd HH:mm:ss");
+
+    static bool TryGetAED(Dictionary<string, double> map, string device, DateTime ts, out double value) =>
+        map.TryGetValue(MapKey(device, ts), out value);
+
+    static DateTime? GetDateTimeFlexible(IXLCell cell)
+    {
+        try
+        {
+            // True Excel datetime
+            if (cell.DataType == XLDataType.DateTime)
+                return cell.GetDateTime();
+
+            // Excel serial number stored as number
+            if (cell.DataType == XLDataType.Number)
+            {
+                double n = cell.GetDouble();
+                // Usually AED is number too, but we only call this for timestamp column
+                // If it's a valid OADate range, convert
+                if (n > 0 && n < 600000) // rough guard for OADate range
+                    return DateTime.FromOADate(n);
+            }
+
+            // Text parsing (e.g., "2025-01-01 02:00:00")
+            string s = cell.GetString().Trim();
+            if (string.IsNullOrEmpty(s)) return null;
+
+            string[] formats = {
+                "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd H:mm:ss",
+                "M/d/yyyy H:mm", "M/d/yyyy HH:mm",
+                "dd-MM-yyyy HH:mm:ss", "dd/MM/yyyy HH:mm:ss",
+                "yyyy/MM/dd HH:mm:ss"
+            };
+            if (DateTime.TryParseExact(
+                    s, formats, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeLocal,
+                    out var dt))
+                return dt;
+
+            if (double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out double oa))
+                return DateTime.FromOADate(oa);
+        }
+        catch { /* swallow and return null */ }
+
+        return null;
+    }
+
+    static double? GetDoubleFlexible(IXLCell cell)
+    {
+        try
+        {
+            if (cell.DataType == XLDataType.Number)
+                return cell.GetDouble();
+
+            string s = cell.GetString().Trim();
+            if (string.IsNullOrEmpty(s)) return null;
+
+            if (double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out double v))
+                return v;
+        }
+        catch { /* ignore */ }
+
         return null;
     }
 }
