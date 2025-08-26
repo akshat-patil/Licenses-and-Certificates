@@ -1,0 +1,61 @@
+using System;
+using System.IO;
+using ClosedXML.Excel;
+
+class Program
+{
+    static void Main(string[] args)
+    {
+        string inputPath = @"C:\Users\YourName\Desktop\hourly 1.xlsx";   // Change this path
+        string outputPath = @"C:\Users\YourName\Desktop\hourly_with_yAEC.xlsx";
+
+        using (var workbook = new XLWorkbook(inputPath))
+        {
+            var ws = workbook.Worksheet(1); // first sheet
+
+            int lastRow = ws.LastRowUsed().RowNumber();
+            int tsCol = 2; // Local Time Stamp column (B)
+            int aedCol = 3; // AED column (C)
+            int yAECCol = 7; // G column (new one)
+
+            ws.Cell(1, yAECCol).Value = "y_AEC"; // header
+
+            for (int row = 2; row <= lastRow; row++)
+            {
+                DateTime currentTs = ws.Cell(row, tsCol).GetDateTime();
+
+                DateTime prevDaySameHour = currentTs.AddDays(-1);
+                DateTime prevDayPrevHour = prevDaySameHour.AddHours(-1);
+
+                double? prevDaySameHourAED = FindAED(ws, tsCol, aedCol, prevDaySameHour, lastRow);
+                double? prevDayPrevHourAED = FindAED(ws, tsCol, aedCol, prevDayPrevHour, lastRow);
+
+                if (prevDaySameHourAED.HasValue && prevDayPrevHourAED.HasValue)
+                {
+                    ws.Cell(row, yAECCol).Value = prevDaySameHourAED.Value - prevDayPrevHourAED.Value;
+                }
+                else
+                {
+                    ws.Cell(row, yAECCol).Value = ""; // leave blank if missing
+                }
+            }
+
+            workbook.SaveAs(outputPath);
+        }
+
+        Console.WriteLine("Done! File saved at: " + outputPath);
+    }
+
+    static double? FindAED(IXLWorksheet ws, int tsCol, int aedCol, DateTime targetTs, int lastRow)
+    {
+        for (int r = 2; r <= lastRow; r++)
+        {
+            DateTime ts = ws.Cell(r, tsCol).GetDateTime();
+            if (ts == targetTs)
+            {
+                return ws.Cell(r, aedCol).GetDouble();
+            }
+        }
+        return null;
+    }
+}
