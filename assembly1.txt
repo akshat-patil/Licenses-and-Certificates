@@ -1,0 +1,242 @@
+using System;
+using System.Configuration;
+using System.Data;
+using Microsoft.Data.Sqlite;
+using Microsoft.Data.SqlClient;
+using System.IO;
+using System.Text;
+
+namespace AssemblyDataTransfer
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            string folderPath = ConfigurationManager.AppSettings["DbFolderPath"];
+            string sqlConnectionString = ConfigurationManager.AppSettings["SqlConnectionString"];
+
+            Console.WriteLine("Checking folder: " + folderPath);
+
+            string dbFile = GetLatestDbFile(folderPath);
+            if (dbFile == null)
+            {
+                Console.WriteLine("No .db file found. Exiting.");
+                return;
+            }
+
+            Console.WriteLine("Processing file: " + dbFile);
+
+            using (var sqliteConn = new SqliteConnection($"Data Source={dbFile}"))
+            {
+                sqliteConn.Open();
+
+                // Get all table names
+                var getTablesCmd = sqliteConn.CreateCommand();
+                getTablesCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table'";
+                using (var reader = getTablesCmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        string tableName = reader.GetString(0);
+                        Console.WriteLine($"Processing table: {tableName}");
+
+                        // Load table schema
+                        DataTable schemaTable = sqliteConn.GetSchema("Columns", new string[] { null, null, tableName, null });
+
+                        // Create table in SQL Server if not exists
+                        CreateSqlServerTable(sqlConnectionString, tableName, schemaTable);
+
+                        // Detect primary key in SQLite
+                        string pkColumn = GetPrimaryKeyColumn(sqliteConn, tableName);
+
+                        if (!string.IsNullOrEmpty(pkColumn))
+                        {
+                            Console.WriteLine($"Using primary key sync on {pkColumn}");
+                            CopyDataUsingPrimaryKey(sqliteConn, sqlConnectionString, tableName, pkColumn, schemaTable);
+                        }
+                        else
+                        {
+                            Console.WriteLine("No primary key found, using rowid sync");
+                            CopyDataUsingRowId(sqliteConn, sqlConnectionString, tableName, schemaTable);
+                        }
+                    }
+                }
+            }
+
+            Console.WriteLine("Sync complete. Exiting.");
+        }
+
+        static string GetLatestDbFile(string folderPath)
+        {
+            if (!Directory.Exists(folderPath))
+                return null;
+
+            var files = Directory.GetFiles(folderPath, "*.db");
+            if (files.Length == 0) return null;
+
+            return files[0]; // Only one file exists
+        }
+
+        static void CreateSqlServerTable(string sqlConnStr, string tableName, DataTable schemaTable)
+        {
+            using (SqlConnection sqlConn = new SqlConnection(sqlConnStr))
+            {
+                sqlConn.Open();
+
+                string checkTableQuery = $"IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{tableName}') BEGIN ";
+                StringBuilder createTableQuery = new StringBuilder();
+                createTableQuery.Append($"CREATE TABLE [{tableName}] (");
+
+                foreach (DataRow col in schemaTable.Rows)
+                {
+                    string colName = col["COLUMN_NAME"].ToString();
+                    string colType = col["DATA_TYPE"].ToString().ToLower();
+
+                    string sqlType = MapSqlType(colType);
+                    createTableQuery.Append($"[{colName}] {sqlType},");
+                }
+                createTableQuery.Length--; // remove last comma
+                createTableQuery.Append(") END");
+
+                using (SqlCommand cmd = new SqlCommand(checkTableQuery + createTableQuery.ToString(), sqlConn))
+                {
+                    cmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        static string MapSqlType(string sqliteType)
+        {
+            return sqliteType switch
+            {
+                "integer" => "BIGINT",
+                "real" => "FLOAT",
+                "text" => "NVARCHAR(MAX)",
+                "blob" => "VARBINARY(MAX)",
+                _ => "NVARCHAR(MAX)"
+            };
+        }
+
+        static string GetPrimaryKeyColumn(SqliteConnection sqliteConn, string tableName)
+        {
+            using (var cmd = sqliteConn.CreateCommand())
+            {
+                cmd.CommandText = $"PRAGMA table_info([{tableName}])";
+                using (var reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        if (reader.GetInt32(5) == 1) // pk == 1
+                        {
+                            return reader.GetString(1); // column name
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        static void CopyDataUsingPrimaryKey(SqliteConnection sqliteConn, string sqlConnStr, string tableName, string pkColumn, DataTable schemaTable)
+        {
+            long lastMaxId = GetLastMaxId(sqlConnStr, tableName, pkColumn);
+
+            using (SqliteCommand cmd = sqliteConn.CreateCommand())
+            {
+                cmd.CommandText = $"SELECT * FROM [{tableName}] WHERE [{pkColumn}] > {lastMaxId}";
+                using (var reader = cmd.ExecuteReader())
+                {
+                    BulkInsert(sqlConnStr, tableName, reader);
+                }
+            }
+        }
+
+        static long GetLastMaxId(string sqlConnStr, string tableName, string pkColumn)
+        {
+            using (SqlConnection sqlConn = new SqlConnection(sqlConnStr))
+            {
+                sqlConn.Open();
+                string query = $"SELECT ISNULL(MAX([{pkColumn}]),0) FROM [{tableName}]";
+                using (SqlCommand cmd = new SqlCommand(query, sqlConn))
+                {
+                    return Convert.ToInt64(cmd.ExecuteScalar());
+                }
+            }
+        }
+
+        static void CopyDataUsingRowId(SqliteConnection sqliteConn, string sqlConnStr, string tableName, DataTable schemaTable)
+        {
+            // Use SQLite rowid
+            using (SqliteCommand cmd = sqliteConn.CreateCommand())
+            {
+                cmd.CommandText = $"SELECT * FROM [{tableName}]";
+                using (var reader = cmd.ExecuteReader())
+                {
+                    BulkInsert(sqlConnStr, tableName, reader);
+                }
+            }
+        }
+
+        static void BulkInsert(string sqlConnStr, string tableName, SqliteDataReader reader)
+        {
+            using (SqlConnection sqlConn = new SqlConnection(sqlConnStr))
+            {
+                sqlConn.Open();
+
+                while (reader.Read())
+                {
+                    StringBuilder cols = new StringBuilder();
+                    StringBuilder vals = new StringBuilder();
+
+                    for (int i = 0; i < reader.FieldCount; i++)
+                    {
+                        string colName = reader.GetName(i);
+                        object val = reader.GetValue(i);
+
+                        cols.Append($"[{colName}],");
+                        vals.Append(val == DBNull.Value ? "NULL," : $"'{val.ToString().Replace("'", "''")}',");
+                    }
+
+                    if (cols.Length > 0)
+                    {
+                        cols.Length--;
+                        vals.Length--;
+                    }
+
+                    string insertQuery = $"INSERT INTO [{tableName}] ({cols}) VALUES ({vals})";
+
+                    using (SqlCommand insertCmd = new SqlCommand(insertQuery, sqlConn))
+                    {
+                        insertCmd.ExecuteNonQuery();
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+  <appSettings>
+    <!-- Path to folder where .db file appears -->
+    <add key="DbFolderPath" value="C:\Akshat\Desktop\Assembly\" />
+    
+    <!-- SQL Server connection string -->
+    <add key="SqlConnectionString" value="Server=PCNA0000;Database=AssemblyDb;User Id=sa;Password=Epcos600$;" />
+  </appSettings>
+</configuration>
+
+Install-Package Microsoft.Data.Sqlite
+Install-Package Microsoft.Data.SqlClient
+
+USE AssemblyDb;
+GO
+SELECT TABLE_NAME
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_TYPE = 'BASE TABLE';
+
+USE AssemblyDb;
+GO
+SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
+FROM INFORMATION_SCHEMA.COLUMNS
+ORDER BY TABLE_NAME, ORDINAL_POSITION;
