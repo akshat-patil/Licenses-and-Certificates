@@ -180,3 +180,195 @@ namespace AssemblyDataTransfer
         }
     }
 }
+
+
+
+
+
+
+using System;
+using System.Configuration;
+using System.Data;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Data.Sqlite;
+using Microsoft.Data.SqlClient;
+
+namespace AssemblyDataTransfer
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            try
+            {
+                string folderPath = ConfigurationManager.AppSettings["DbFolderPath"];
+                string sqlConnectionString = ConfigurationManager.AppSettings["SqlConnectionString"];
+
+                Console.WriteLine("Checking folder: " + folderPath);
+
+                string dbFile = GetLatestDbFile(folderPath);
+                if (dbFile == null)
+                {
+                    Console.WriteLine("No .db file found. Exiting.");
+                    return;
+                }
+
+                Console.WriteLine("Processing file: " + dbFile);
+
+                using (var sqliteConn = new SqliteConnection($"Data Source={dbFile}"))
+                using (var sqlConn = new SqlConnection(sqlConnectionString))
+                {
+                    sqliteConn.Open();
+                    sqlConn.Open();
+
+                    // get all tables from .db
+                    var getTablesCmd = sqliteConn.CreateCommand();
+                    getTablesCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table';";
+
+                    using (var reader = getTablesCmd.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            string tableName = reader.GetString(0);
+                            Console.WriteLine("Syncing table: " + tableName);
+                            SyncTable(sqliteConn, sqlConn, tableName);
+                        }
+                    }
+                }
+
+                Console.WriteLine("✅ Sync complete.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("❌ ERROR: " + ex.Message);
+            }
+        }
+
+        static string GetLatestDbFile(string folderPath)
+        {
+            if (!Directory.Exists(folderPath))
+                return null;
+
+            string[] files = Directory.GetFiles(folderPath, "*.db");
+            if (files.Length == 0)
+                return null;
+
+            Array.Sort(files, (a, b) => File.GetLastWriteTime(b).CompareTo(File.GetLastWriteTime(a)));
+            return files[0]; // newest file
+        }
+
+        static void SyncTable(SqliteConnection sqliteConn, SqlConnection sqlConn, string tableName)
+        {
+            // get table schema
+            var schemaCmd = sqliteConn.CreateCommand();
+            schemaCmd.CommandText = $"PRAGMA table_info([{tableName}]);";
+
+            DataTable schemaTable = new DataTable();
+            using (var reader = schemaCmd.ExecuteReader())
+            {
+                schemaTable.Load(reader);
+            }
+
+            // build CREATE TABLE query for SQL Server
+            StringBuilder createSql = new StringBuilder();
+            createSql.Append($"IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='{tableName}' AND xtype='U') ");
+            createSql.Append("CREATE TABLE [" + tableName + "] (");
+
+            foreach (DataRow row in schemaTable.Rows)
+            {
+                string colName = row["name"].ToString();
+                string colType = row["type"].ToString();
+                createSql.Append("[" + colName + "] " + MapSqlType(colType) + ",");
+            }
+
+            createSql.Append("[_hash] NVARCHAR(64));"); // hash column for uniqueness
+
+            using (var cmd = new SqlCommand(createSql.ToString(), sqlConn))
+            {
+                cmd.ExecuteNonQuery();
+            }
+
+            // read all rows from sqlite
+            var selectCmd = sqliteConn.CreateCommand();
+            selectCmd.CommandText = $"SELECT * FROM [{tableName}]";
+
+            using (var reader = selectCmd.ExecuteReader())
+            {
+                DataTable data = new DataTable();
+                data.Load(reader);
+
+                foreach (DataRow row in data.Rows)
+                {
+                    string hash = GetRowHash(row);
+
+                    // check if row exists
+                    string existsSql = $"SELECT COUNT(*) FROM [{tableName}] WHERE [_hash] = @hash";
+                    using (var checkCmd = new SqlCommand(existsSql, sqlConn))
+                    {
+                        checkCmd.Parameters.AddWithValue("@hash", hash);
+                        int count = (int)checkCmd.ExecuteScalar();
+                        if (count > 0)
+                            continue; // skip duplicate
+                    }
+
+                    // build insert query
+                    StringBuilder cols = new StringBuilder();
+                    StringBuilder vals = new StringBuilder();
+
+                    foreach (DataColumn col in data.Columns)
+                    {
+                        cols.Append("[" + col.ColumnName + "],");
+                        vals.Append("@" + col.ColumnName + ",");
+                    }
+                    cols.Append("[_hash]");
+                    vals.Append("@hash");
+
+                    string insertSql = $"INSERT INTO [{tableName}] ({cols}) VALUES ({vals})";
+
+                    using (var insertCmd = new SqlCommand(insertSql, sqlConn))
+                    {
+                        foreach (DataColumn col in data.Columns)
+                        {
+                            insertCmd.Parameters.AddWithValue("@" + col.ColumnName, row[col] ?? DBNull.Value);
+                        }
+                        insertCmd.Parameters.AddWithValue("@hash", hash);
+                        insertCmd.ExecuteNonQuery();
+                    }
+                }
+            }
+        }
+
+        static string MapSqlType(string sqliteType)
+        {
+            sqliteType = sqliteType.ToLower();
+            if (sqliteType.Contains("int"))
+                return "BIGINT";
+            else if (sqliteType.Contains("real") || sqliteType.Contains("floa") || sqliteType.Contains("doub"))
+                return "FLOAT";
+            else if (sqliteType.Contains("text") || sqliteType.Contains("char") || sqliteType.Contains("clob"))
+                return "NVARCHAR(MAX)";
+            else if (sqliteType.Contains("blob"))
+                return "VARBINARY(MAX)";
+            else
+                return "NVARCHAR(MAX)";
+        }
+
+        static string GetRowHash(DataRow row)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (var item in row.ItemArray)
+            {
+                sb.Append(item == null ? "NULL" : item.ToString());
+                sb.Append("|");
+            }
+
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] hashBytes = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+                return BitConverter.ToString(hashBytes).Replace("-", "");
+            }
+        }
+    }
+}
