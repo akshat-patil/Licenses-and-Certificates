@@ -1,0 +1,182 @@
+using System;
+using System.Configuration;
+using System.Data;
+using Microsoft.Data.Sqlite;
+using Microsoft.Data.SqlClient;
+using System.IO;
+using System.Text;
+
+namespace AssemblyDataTransfer
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            string folderPath = ConfigurationManager.AppSettings["DbFolderPath"];
+            string sqlConnectionString = ConfigurationManager.AppSettings["SqlConnectionString"];
+
+            Console.WriteLine("Monitoring folder: " + folderPath);
+
+            while (true)
+            {
+                try
+                {
+                    // Find latest .db file
+                    string dbFile = GetLatestDbFile(folderPath);
+                    if (dbFile == null)
+                    {
+                        Console.WriteLine("No .db file found yet. Retrying in 30s...");
+                        System.Threading.Thread.Sleep(30000);
+                        continue;
+                    }
+
+                    Console.WriteLine("Processing file: " + dbFile);
+
+                    using (var sqliteConn = new SqliteConnection($"Data Source={dbFile}"))
+                    {
+                        sqliteConn.Open();
+
+                        // Get all table names
+                        var getTablesCmd = sqliteConn.CreateCommand();
+                        getTablesCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table'";
+                        using (var reader = getTablesCmd.ExecuteReader())
+                        {
+                            while (reader.Read())
+                            {
+                                string tableName = reader.GetString(0);
+                                Console.WriteLine($"Processing table: {tableName}");
+
+                                // Load table schema
+                                DataTable schemaTable = sqliteConn.GetSchema("Columns", new string[] { null, null, tableName, null });
+
+                                // Create table in SQL Server if not exists
+                                CreateSqlServerTable(sqlConnectionString, tableName, schemaTable);
+
+                                // Copy data
+                                CopyData(sqliteConn, sqlConnectionString, tableName, schemaTable);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Error: " + ex.Message);
+                }
+
+                Console.WriteLine("Sleeping 5 minutes before checking again...");
+                System.Threading.Thread.Sleep(TimeSpan.FromMinutes(5));
+            }
+        }
+
+        static string GetLatestDbFile(string folderPath)
+        {
+            if (!Directory.Exists(folderPath))
+                return null;
+
+            var files = Directory.GetFiles(folderPath, "*.db");
+            if (files.Length == 0) return null;
+
+            return files[0]; // If multiple, you can pick latest: OrderByDescending(f => File.GetLastWriteTime(f)).First()
+        }
+
+        static void CreateSqlServerTable(string sqlConnStr, string tableName, DataTable schemaTable)
+        {
+            using (SqlConnection sqlConn = new SqlConnection(sqlConnStr))
+            {
+                sqlConn.Open();
+
+                // Check if table exists
+                string checkTableQuery = $"IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{tableName}') BEGIN ";
+                StringBuilder createTableQuery = new StringBuilder();
+                createTableQuery.Append($"CREATE TABLE [{tableName}] (");
+
+                foreach (DataRow col in schemaTable.Rows)
+                {
+                    string colName = col["COLUMN_NAME"].ToString();
+                    string colType = col["DATA_TYPE"].ToString().ToLower();
+
+                    string sqlType = MapSqlType(colType);
+                    createTableQuery.Append($"[{colName}] {sqlType},");
+                }
+                createTableQuery.Length--; // remove last comma
+                createTableQuery.Append(") END");
+
+                using (SqlCommand cmd = new SqlCommand(checkTableQuery + createTableQuery.ToString(), sqlConn))
+                {
+                    cmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        static string MapSqlType(string sqliteType)
+        {
+            return sqliteType switch
+            {
+                "integer" => "INT",
+                "real" => "FLOAT",
+                "text" => "NVARCHAR(MAX)",
+                "blob" => "VARBINARY(MAX)",
+                _ => "NVARCHAR(MAX)"
+            };
+        }
+
+        static void CopyData(SqliteConnection sqliteConn, string sqlConnStr, string tableName, DataTable schemaTable)
+        {
+            using (SqliteCommand cmd = sqliteConn.CreateCommand())
+            {
+                cmd.CommandText = $"SELECT * FROM [{tableName}]";
+                using (var reader = cmd.ExecuteReader())
+                {
+                    using (SqlConnection sqlConn = new SqlConnection(sqlConnStr))
+                    {
+                        sqlConn.Open();
+
+                        while (reader.Read())
+                        {
+                            StringBuilder cols = new StringBuilder();
+                            StringBuilder vals = new StringBuilder();
+
+                            for (int i = 0; i < reader.FieldCount; i++)
+                            {
+                                string colName = reader.GetName(i);
+                                object val = reader.GetValue(i);
+
+                                cols.Append($"[{colName}],");
+                                vals.Append(val == DBNull.Value ? "NULL," : $"'{val.ToString().Replace("'", "''")}',");
+                            }
+
+                            if (cols.Length > 0)
+                            {
+                                cols.Length--;
+                                vals.Length--;
+                            }
+
+                            string insertQuery = $"IF NOT EXISTS (SELECT 1 FROM [{tableName}] WHERE {BuildWhereClause(reader)}) " +
+                                                 $"INSERT INTO [{tableName}] ({cols}) VALUES ({vals})";
+
+                            using (SqlCommand insertCmd = new SqlCommand(insertQuery, sqlConn))
+                            {
+                                insertCmd.ExecuteNonQuery();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        static string BuildWhereClause(SqliteDataReader reader)
+        {
+            StringBuilder where = new StringBuilder("1=1");
+            for (int i = 0; i < reader.FieldCount; i++)
+            {
+                object val = reader.GetValue(i);
+                string colName = reader.GetName(i);
+
+                if (val == DBNull.Value) continue;
+
+                where.Append($" AND [{colName}] = '{val.ToString().Replace("'", "''")}'");
+            }
+            return where.ToString();
+        }
+    }
+}
