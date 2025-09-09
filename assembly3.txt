@@ -136,3 +136,15 @@ namespace AssemblyDataTransfer
         }
     }
 }
+
+
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+  <appSettings>
+    <add key="DbFolderPath" value="C:\Akshat\Desktop\Assembly\" />
+  </appSettings>
+
+  <connectionStrings>
+    <add name="SqlServer" connectionString="Server=PCNA0000;Database=AssemblyDb;User Id=sa;Password=Epcos600$;" providerName="System.Data.SqlClient"/>
+  </connectionStrings>
+</configuration>
