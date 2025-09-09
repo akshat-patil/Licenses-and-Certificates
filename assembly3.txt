@@ -291,3 +291,15 @@ namespace AssemblyDataSync
         }
     }
 }
+
+
+
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+  <appSettings>
+    <!-- Path to folder where .db file is located -->
+    <add key="DbFolderPath" value="C:\Akshat\Desktop\Assembly\" />
+    <!-- SQL Server connection -->
+    <add key="SqlConnectionString" value="Server=PCNA0000;Database=AssemblyDb;User Id=sa;Password=Epcos600$;" />
+  </appSettings>
+</configuration>
