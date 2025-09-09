@@ -1,0 +1,138 @@
+using System;
+using System.Configuration;
+using System.Data;
+using System.Data.SQLite; // From System.Data.SQLite NuGet
+using System.Data.SqlClient;
+using System.IO;
+
+namespace AssemblyDataTransfer
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            string folderPath = ConfigurationManager.AppSettings["DbFolderPath"];
+            string sqlServerConnStr = ConfigurationManager.ConnectionStrings["SqlServer"].ConnectionString;
+
+            Console.WriteLine("🔍 Checking folder: " + folderPath);
+
+            if (!Directory.Exists(folderPath))
+            {
+                Console.WriteLine("❌ Folder not found.");
+                return;
+            }
+
+            string[] files = Directory.GetFiles(folderPath, "*.db");
+            if (files.Length == 0)
+            {
+                Console.WriteLine("⚠️ No .db file found.");
+                return;
+            }
+
+            foreach (var file in files)
+            {
+                Console.WriteLine("📂 Processing file: " + file);
+
+                try
+                {
+                    using (var sqliteConn = new SQLiteConnection($"Data Source={file};Version=3;"))
+                    using (var sqlConn = new SqlConnection(sqlServerConnStr))
+                    {
+                        sqliteConn.Open();
+                        sqlConn.Open();
+
+                        DataTable tables = sqliteConn.GetSchema("Tables");
+
+                        foreach (DataRow table in tables.Rows)
+                        {
+                            string tableName = table["TABLE_NAME"].ToString();
+                            Console.WriteLine($"\n➡️ Syncing table: {tableName}");
+
+                            // Load data from SQLite
+                            using (var cmd = new SQLiteCommand($"SELECT * FROM [{tableName}];", sqliteConn))
+                            using (var reader = cmd.ExecuteReader())
+                            {
+                                DataTable schema = reader.GetSchemaTable();
+
+                                // Build CREATE TABLE if not exists
+                                string createTableSql = BuildCreateTableSql(tableName, schema);
+                                using (var createCmd = new SqlCommand(createTableSql, sqlConn))
+                                {
+                                    createCmd.ExecuteNonQuery();
+                                }
+
+                                int insertedCount = 0;
+
+                                while (reader.Read())
+                                {
+                                    string insertSql = BuildInsertSql(tableName, schema, reader);
+                                    using (var insertCmd = new SqlCommand(insertSql, sqlConn))
+                                    {
+                                        insertedCount += insertCmd.ExecuteNonQuery();
+                                    }
+                                }
+
+                                Console.WriteLine($"✅ Inserted {insertedCount} rows into {tableName}");
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("❌ ERROR: " + ex.Message);
+                }
+            }
+
+            Console.WriteLine("\n🎉 Transfer completed.");
+        }
+
+        // Builds CREATE TABLE SQL dynamically
+        static string BuildCreateTableSql(string tableName, DataTable schema)
+        {
+            string sql = $"IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='{tableName}' AND xtype='U') CREATE TABLE [{tableName}] (";
+
+            foreach (DataRow col in schema.Rows)
+            {
+                string colName = col["ColumnName"].ToString();
+                string colType = col["DataTypeName"].ToString();
+
+                string sqlType = "NVARCHAR(MAX)";
+                if (colType.Contains("INT")) sqlType = "INT";
+                else if (colType.Contains("DOUBLE") || colType.Contains("REAL")) sqlType = "FLOAT";
+                else if (colType.Contains("DATE") || colType.Contains("TIME")) sqlType = "DATETIME";
+
+                sql += $"[{colName}] {sqlType},";
+            }
+
+            sql = sql.TrimEnd(',') + ")";
+            return sql;
+        }
+
+        // Builds INSERT SQL dynamically
+        static string BuildInsertSql(string tableName, DataTable schema, IDataRecord row)
+        {
+            string cols = "";
+            string vals = "";
+
+            foreach (DataRow col in schema.Rows)
+            {
+                string colName = col["ColumnName"].ToString();
+                object val = row[colName];
+
+                cols += $"[{colName}],";
+
+                if (val == DBNull.Value)
+                    vals += "NULL,";
+                else if (val is string || val is DateTime)
+                    vals += $"'{val.ToString().Replace("'", "''")}',";
+                else
+                    vals += val.ToString().Replace(",", ".") + ",";
+            }
+
+            cols = cols.TrimEnd(',');
+            vals = vals.TrimEnd(',');
+
+            return $"INSERT INTO [{tableName}] ({cols}) VALUES ({vals})";
+        }
+    }
+}
