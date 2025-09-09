@@ -1,0 +1,146 @@
+Uninstall-Package System.Data.SQLite
+
+Install-Package Microsoft.Data.Sqlite
+Install-Package System.Data.SqlClient
+
+using System;
+using System.Configuration;
+using System.Data;
+using Microsoft.Data.Sqlite;   // lighter, no native DLL mess
+using System.Data.SqlClient;
+using System.IO;
+using System.Linq;
+
+namespace AssemblyDataSync
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            Console.WriteLine("=== Assembly DB Sync Started ===");
+
+            string folderPath = ConfigurationManager.AppSettings["DbFolderPath"];
+            string sqlConnString = ConfigurationManager.AppSettings["SqlConnectionString"];
+
+            if (!Directory.Exists(folderPath))
+            {
+                Console.WriteLine("ERROR: Folder not found: " + folderPath);
+                return;
+            }
+
+            // find the .db file
+            string[] dbFiles = Directory.GetFiles(folderPath, "*.db");
+            if (dbFiles.Length == 0)
+            {
+                Console.WriteLine("No .db file found in folder: " + folderPath);
+                return;
+            }
+
+            string dbPath = dbFiles[0];
+            Console.WriteLine("Using SQLite file: " + dbPath);
+
+            string sqliteConnString = $"Data Source={dbPath};";
+
+            try
+            {
+                using (var sqliteConn = new SqliteConnection(sqliteConnString))
+                {
+                    sqliteConn.Open();
+
+                    // get all tables
+                    DataTable tables = sqliteConn.GetSchema("Tables");
+                    foreach (DataRow table in tables.Rows)
+                    {
+                        string tableName = table["TABLE_NAME"].ToString();
+                        Console.WriteLine($"\nProcessing table: {tableName}");
+
+                        using (var cmd = sqliteConn.CreateCommand())
+                        {
+                            cmd.CommandText = $"SELECT * FROM [{tableName}]";
+                            using (var reader = cmd.ExecuteReader())
+                            {
+                                DataTable dt = new DataTable();
+                                dt.Load(reader);
+
+                                PushTableToSqlServer(dt, tableName, sqlConnString);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("ERROR: " + ex.Message);
+            }
+
+            Console.WriteLine("\n=== Assembly DB Sync Finished ===");
+            Console.ReadKey();
+        }
+
+        static void PushTableToSqlServer(DataTable dt, string tableName, string sqlConnString)
+        {
+            if (dt.Rows.Count == 0)
+            {
+                Console.WriteLine($"No data in table {tableName}, skipping...");
+                return;
+            }
+
+            using (SqlConnection sqlConn = new SqlConnection(sqlConnString))
+            {
+                sqlConn.Open();
+
+                // create table if not exists
+                string checkTableQuery = $@"
+                    IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{tableName}')
+                    BEGIN
+                        CREATE TABLE [{tableName}] (
+                            {string.Join(", ", GetSqlColumns(dt))}
+                        )
+                    END";
+
+                using (SqlCommand createCmd = new SqlCommand(checkTableQuery, sqlConn))
+                {
+                    createCmd.ExecuteNonQuery();
+                }
+
+                // insert rows
+                foreach (DataRow row in dt.Rows)
+                {
+                    string columns = string.Join(",", dt.Columns.Cast<DataColumn>().Select(c => $"[{c.ColumnName}]"));
+                    string values = string.Join(",", dt.Columns.Cast<DataColumn>().Select(c => $"@{c.ColumnName}"));
+
+                    string insertQuery = $"INSERT INTO [{tableName}] ({columns}) VALUES ({values})";
+
+                    using (SqlCommand insertCmd = new SqlCommand(insertQuery, sqlConn))
+                    {
+                        foreach (DataColumn col in dt.Columns)
+                        {
+                            insertCmd.Parameters.AddWithValue("@" + col.ColumnName, row[col] ?? DBNull.Value);
+                        }
+
+                        insertCmd.ExecuteNonQuery();
+                    }
+                }
+
+                Console.WriteLine($"Inserted {dt.Rows.Count} rows into {tableName}");
+            }
+        }
+
+        static string[] GetSqlColumns(DataTable dt)
+        {
+            var cols = new string[dt.Columns.Count];
+            for (int i = 0; i < dt.Columns.Count; i++)
+            {
+                string sqlType = "NVARCHAR(MAX)";
+                Type colType = dt.Columns[i].DataType;
+
+                if (colType == typeof(int) || colType == typeof(long)) sqlType = "BIGINT";
+                else if (colType == typeof(double) || colType == typeof(float) || colType == typeof(decimal)) sqlType = "FLOAT";
+                else if (colType == typeof(DateTime)) sqlType = "DATETIME";
+
+                cols[i] = $"[{dt.Columns[i].ColumnName}] {sqlType}";
+            }
+            return cols;
+        }
+    }
+}
