@@ -216,55 +216,58 @@ namespace Assembly3DCamera
         }
 
         static void ExportDbToCsv(string vDbFolderPath, string vCsvFolderPath, string vLogFile)
+{
+    try
+    {
+        string vDbFile = Directory.GetFiles(vDbFolderPath, "*.db")
+            .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+            .FirstOrDefault();
+
+        if (vDbFile == null)
         {
-            try
+            Console.WriteLine($"[{DateTime.Now}] No .db file found in: " + vDbFolderPath);
+            return;
+        }
+
+        using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
+        {
+            oConn.Open();
+
+            using (var oTblCmd = oConn.CreateCommand())
             {
-                string vDbFile = Directory.GetFiles(vDbFolderPath, "*.db")
-                    .OrderByDescending(f => new FileInfo(f).LastWriteTime)
-                    .FirstOrDefault();
+                oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
 
-                if (vDbFile == null)
+                using (var oTblReader = oTblCmd.ExecuteReader())
                 {
-                    Console.WriteLine("No .db file found in: " + vDbFolderPath);
-                    return;
-                }
+                    List<string> vTables = new List<string>();
+                    while (oTblReader.Read())
+                        vTables.Add(oTblReader.GetString(0));
 
-                using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
-                {
-                    oConn.Open();
-
-                    using (var oTblCmd = oConn.CreateCommand())
+                    foreach (string vTable in vTables)
                     {
-                        oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
-
-                        using (var oTblReader = oTblCmd.ExecuteReader())
+                        try
                         {
-                            List<string> vTables = new List<string>();
-                            while (oTblReader.Read())
-                                vTables.Add(oTblReader.GetString(0));
-
-                            foreach (string vTable in vTables)
-                            {
-                                try
-                                {
-                                    ExportTableToCsv(oConn, vTable, vCsvFolderPath, vLogFile);
-                                }
-                                catch (Exception exTable)
-                                {
-                                    string vMessage = $"[{DateTime.Now}] Table '{vTable}': {exTable}\n";
-                                    File.AppendAllText(vLogFile, vMessage);
-                                }
-                            }
+                            ExportTableToCsv(oConn, vTable, vCsvFolderPath, vLogFile);
+                        }
+                        catch (Exception exTable)
+                        {
+                            string vMessage = $"[{DateTime.Now}] Table '{vTable}': {exTable}\n";
+                            File.AppendAllText(vLogFile, vMessage);
                         }
                     }
                 }
             }
-            catch (Exception ex)
-            {
-                File.AppendAllText(vLogFile, $"[{DateTime.Now}] General DB read error: {ex}\n");
-                Console.WriteLine("Error reading DB: " + ex.Message);
-            }
         }
+
+        // ✅ Always print status at the end of each cycle
+        Console.WriteLine($"[{DateTime.Now}] Check complete — all tables processed.");
+    }
+    catch (Exception ex)
+    {
+        File.AppendAllText(vLogFile, $"[{DateTime.Now}] General DB read error: {ex}\n");
+        Console.WriteLine("Error reading DB: " + ex.Message);
+    }
+}
 
         static void ExportTableToCsv(SqliteConnection oConn, string vTableName, string vCsvFolderPath, string vLogFile)
         {
