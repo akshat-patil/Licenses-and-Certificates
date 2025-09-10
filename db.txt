@@ -1,0 +1,133 @@
+using System;
+using System.Configuration;
+using System.IO;
+using System.Linq;
+using System.Text;
+using Microsoft.Data.Sqlite;
+
+class Program
+{
+    static void Main()
+    {
+        string dbFolderPath = ConfigurationManager.AppSettings["DbFolderPath"];
+        string csvFolderPath = ConfigurationManager.AppSettings["CsvFolderPath"];
+        string logFile = Path.Combine(dbFolderPath, "exceptions.txt");
+
+        try { Directory.CreateDirectory(csvFolderPath); } 
+        catch (Exception ex) { Console.WriteLine("Cannot create CSV folder: " + ex.Message); return; }
+
+        string dbFile = Directory.GetFiles(dbFolderPath, "*.db")
+                                 .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+                                 .FirstOrDefault();
+
+        if (dbFile == null)
+        {
+            Console.WriteLine("No .db file found in: " + dbFolderPath);
+            return;
+        }
+
+        Console.WriteLine("Using DB file: " + dbFile);
+
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={dbFile}");
+            conn.Open();
+
+            // Get user tables (ignore SQLite internal tables)
+            using var tblCmd = conn.CreateCommand();
+            tblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+            using var tblReader = tblCmd.ExecuteReader();
+
+            var tables = new System.Collections.Generic.List<string>();
+            while (tblReader.Read()) tables.Add(tblReader.GetString(0));
+
+            if (tables.Count == 0)
+            {
+                Console.WriteLine("No tables found in DB.");
+                return;
+            }
+
+            foreach (var table in tables)
+            {
+                try
+                {
+                    string safeName = SanitizeFileName(table);
+                    string csvPath = Path.Combine(csvFolderPath, safeName + ".csv");
+
+                    using var cmd = conn.CreateCommand();
+                    // quote identifier safely
+                    cmd.CommandText = $"SELECT * FROM \"{table.Replace("\"", "\"\"")}\";";
+
+                    using var reader = cmd.ExecuteReader();
+                    using var writer = new StreamWriter(csvPath, false, Encoding.UTF8);
+
+                    // header
+                    int cols = reader.FieldCount;
+                    for (int i = 0; i < cols; i++)
+                    {
+                        if (i > 0) writer.Write(",");
+                        writer.Write(EscapeCsvField(reader.GetName(i)));
+                    }
+                    writer.WriteLine();
+
+                    // rows
+                    int rowCount = 0;
+                    while (reader.Read())
+                    {
+                        for (int i = 0; i < cols; i++)
+                        {
+                            if (i > 0) writer.Write(",");
+                            if (reader.IsDBNull(i)) writer.Write("");
+                            else writer.Write(EscapeCsvField(reader.GetValue(i)?.ToString()));
+                        }
+                        writer.WriteLine();
+                        rowCount++;
+                    }
+
+                    Console.WriteLine($"Exported {rowCount} rows from '{table}' → {csvPath}");
+                }
+                catch (Exception exTable)
+                {
+                    string m = $"[{DateTime.Now}] Table '{table}': {exTable}\n";
+                    File.AppendAllText(logFile, m);
+                    Console.WriteLine($"Error exporting table '{table}': {exTable.Message}");
+                }
+            }
+
+            conn.Close();
+            Console.WriteLine("All done.");
+        }
+        catch (Exception ex)
+        {
+            File.AppendAllText(logFile, $"[{DateTime.Now}] General: {ex}\n");
+            Console.WriteLine("Error: " + ex.Message);
+        }
+    }
+
+    static string EscapeCsvField(string s)
+    {
+        if (s == null) return "";
+        bool mustQuote = s.Contains(",") || s.Contains("\"") || s.Contains("\n") || s.Contains("\r");
+        if (s.Contains("\"")) s = s.Replace("\"", "\"\"");
+        return mustQuote ? $"\"{s}\"" : s;
+    }
+
+    static string SanitizeFileName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sb = new StringBuilder();
+        foreach (var c in name) sb.Append(invalid.Contains(c) ? '_' : c);
+        return sb.ToString();
+    }
+}
+
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+  <appSettings>
+    <!-- folder where .db files live -->
+    <add key="DbFolderPath" value="C:\Akshat\Assembly\DB\"/>
+
+    <!-- folder where CSV files will be created (will be created automatically) -->
+    <add key="CsvFolderPath" value="C:\Akshat\Assembly\CSV\"/>
+  </appSettings>
+</configuration>
