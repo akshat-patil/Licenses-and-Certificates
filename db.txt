@@ -174,3 +174,178 @@ namespace DbToCsvExporter
     <add key="CsvFolderPath" value="C:\Akshat\Assembly\CSV\"/>
   </appSettings>
 </configuration>
+
+
+
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    class Program
+    {
+        private static Dictionary<string, long> vLastExportedRowId = new Dictionary<string, long>();
+        private static Timer oTimer;
+
+        static void Main(string[] args)
+        {
+            string vDbFolderPath = ConfigurationManager.AppSettings["DbFolderPath"];
+            string vCsvFolderPath = ConfigurationManager.AppSettings["CsvFolderPath"];
+            string vLogFile = Path.Combine(vDbFolderPath, "exceptions.txt");
+
+            if (string.IsNullOrWhiteSpace(vDbFolderPath) || string.IsNullOrWhiteSpace(vCsvFolderPath))
+            {
+                Console.WriteLine("Please set DbFolderPath and CsvFolderPath in App.config.");
+                return;
+            }
+
+            Directory.CreateDirectory(vCsvFolderPath);
+
+            // Run immediately, then every 5 minutes
+            oTimer = new Timer(delegate { ExportDbToCsv(vDbFolderPath, vCsvFolderPath, vLogFile); },
+                               null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+
+            Console.WriteLine("Exporter started. Press ENTER to exit...");
+            Console.ReadLine();
+        }
+
+        static void ExportDbToCsv(string vDbFolderPath, string vCsvFolderPath, string vLogFile)
+        {
+            try
+            {
+                string vDbFile = Directory.GetFiles(vDbFolderPath, "*.db")
+                    .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+                    .FirstOrDefault();
+
+                if (vDbFile == null)
+                {
+                    Console.WriteLine("No .db file found in: " + vDbFolderPath);
+                    return;
+                }
+
+                using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
+                {
+                    oConn.Open();
+
+                    using (var oTblCmd = oConn.CreateCommand())
+                    {
+                        oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+
+                        using (var oTblReader = oTblCmd.ExecuteReader())
+                        {
+                            List<string> vTables = new List<string>();
+                            while (oTblReader.Read())
+                                vTables.Add(oTblReader.GetString(0));
+
+                            foreach (string vTable in vTables)
+                            {
+                                try
+                                {
+                                    ExportTableToCsv(oConn, vTable, vCsvFolderPath, vLogFile);
+                                }
+                                catch (Exception exTable)
+                                {
+                                    string vMessage = $"[{DateTime.Now}] Table '{vTable}': {exTable}\n";
+                                    File.AppendAllText(vLogFile, vMessage);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                File.AppendAllText(vLogFile, $"[{DateTime.Now}] General DB read error: {ex}\n");
+                Console.WriteLine("Error reading DB: " + ex.Message);
+            }
+        }
+
+        static void ExportTableToCsv(SqliteConnection oConn, string vTableName, string vCsvFolderPath, string vLogFile)
+        {
+            string vSafeTable = vTableName.Replace("\"", "\"\"");
+            string vCsvFileName = SanitizeFileName(vTableName) + ".csv";
+            string vCsvPath = Path.Combine(vCsvFolderPath, vCsvFileName);
+
+            long vLastRowId = 0;
+            if (vLastExportedRowId.ContainsKey(vTableName))
+                vLastRowId = vLastExportedRowId[vTableName];
+
+            string vQuery = vLastRowId == 0
+                ? $"SELECT ROWID, * FROM \"{vSafeTable}\";"
+                : $"SELECT ROWID, * FROM \"{vSafeTable}\" WHERE ROWID > {vLastRowId};";
+
+            using (var oCmd = oConn.CreateCommand())
+            {
+                oCmd.CommandText = vQuery;
+                using (var oReader = oCmd.ExecuteReader())
+                {
+                    if (!oReader.HasRows) return;
+
+                    using (var oWriter = new StreamWriter(vCsvPath, File.Exists(vCsvPath), Encoding.UTF8))
+                    {
+                        int vCols = oReader.FieldCount;
+
+                        // Write header if file doesn't exist
+                        if (!File.Exists(vCsvPath))
+                        {
+                            for (int i = 1; i < vCols; i++) // skip ROWID
+                            {
+                                if (i > 1) oWriter.Write(",");
+                                oWriter.Write(EscapeCsvField(oReader.GetName(i)));
+                            }
+                            oWriter.WriteLine();
+                        }
+
+                        long vMaxRowId = vLastRowId;
+                        int vRowCount = 0;
+
+                        while (oReader.Read())
+                        {
+                            long vRowId = oReader.GetInt64(0);
+                            vMaxRowId = Math.Max(vMaxRowId, vRowId);
+
+                            for (int i = 1; i < vCols; i++) // skip ROWID
+                            {
+                                if (i > 1) oWriter.Write(",");
+                                if (oReader.IsDBNull(i))
+                                    oWriter.Write("");
+                                else
+                                    oWriter.Write(EscapeCsvField(oReader.GetValue(i).ToString()));
+                            }
+                            oWriter.WriteLine();
+                            vRowCount++;
+                        }
+
+                        vLastExportedRowId[vTableName] = vMaxRowId;
+                        Console.WriteLine($"[{DateTime.Now}] Exported {vRowCount} new rows from '{vTableName}' → {vCsvPath}");
+                    }
+                }
+            }
+        }
+
+        static string EscapeCsvField(string vValue)
+        {
+            if (vValue == null) return "";
+            bool vMustQuote = vValue.Contains(",") || vValue.Contains("\"") || vValue.Contains("\n") || vValue.Contains("\r");
+            if (vValue.Contains("\"")) vValue = vValue.Replace("\"", "\"\"");
+            return vMustQuote ? $"\"{vValue}\"" : vValue;
+        }
+
+        static string SanitizeFileName(string vName)
+        {
+            var vInvalid = Path.GetInvalidFileNameChars();
+            var oSb = new StringBuilder();
+            foreach (var vChar in vName)
+            {
+                oSb.Append(vInvalid.Contains(vChar) ? '_' : vChar);
+            }
+            return oSb.ToString();
+        }
+    }
+}
