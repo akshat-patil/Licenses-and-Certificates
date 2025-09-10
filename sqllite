@@ -1,0 +1,140 @@
+using System;
+using System.Data;
+using System.Data.SqlClient;
+using System.Configuration;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Data.SQLite; // Different package
+
+class Program
+{
+    static string dbFolderPath = ConfigurationManager.AppSettings["DbFolderPath"];
+    static string sqlServerConnStr = ConfigurationManager.AppSettings["SqlServerConnectionString"];
+    static int intervalMinutes = int.Parse(ConfigurationManager.AppSettings["IntervalMinutes"]);
+    static string logFile = Path.Combine(dbFolderPath, "exceptions.txt");
+
+    static void Main()
+    {
+        Console.WriteLine("=== DB Sync Console App Started ===");
+
+        while (true)
+        {
+            try
+            {
+                string dbFile = Directory.GetFiles(dbFolderPath, "*.db").OrderByDescending(f => f).FirstOrDefault();
+                if (dbFile == null)
+                {
+                    Console.WriteLine("No .db file found.");
+                }
+                else
+                {
+                    Console.WriteLine($"Processing file: {dbFile}");
+                    ProcessDbFile(dbFile);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogException(ex);
+            }
+
+            Console.WriteLine($"Waiting {intervalMinutes} minutes...");
+            Thread.Sleep(TimeSpan.FromMinutes(intervalMinutes));
+        }
+    }
+
+    static void ProcessDbFile(string dbFile)
+    {
+        using (var sqliteConn = new SQLiteConnection($"Data Source={dbFile};Version=3;"))
+        {
+            sqliteConn.Open();
+
+            DataTable tables = sqliteConn.GetSchema("Tables");
+            foreach (DataRow row in tables.Rows)
+            {
+                string tableName = row["TABLE_NAME"].ToString();
+                Console.WriteLine($"Reading table: {tableName}");
+
+                var selectCmd = new SQLiteCommand($"SELECT * FROM {tableName}", sqliteConn);
+                using (var reader = selectCmd.ExecuteReader())
+                {
+                    DataTable dt = new DataTable();
+                    dt.Load(reader);
+
+                    DumpToSqlServer(tableName, dt);
+                }
+            }
+        }
+    }
+
+    static void DumpToSqlServer(string tableName, DataTable dt)
+    {
+        using (SqlConnection sqlConn = new SqlConnection(sqlServerConnStr))
+        {
+            sqlConn.Open();
+
+            string createTableSql = GenerateCreateTableSql(tableName, dt);
+            using (SqlCommand cmd = new SqlCommand(createTableSql, sqlConn))
+            {
+                cmd.ExecuteNonQuery();
+            }
+
+            foreach (DataRow row in dt.Rows)
+            {
+                string insertSql = GenerateInsertSql(tableName, dt, row);
+                using (SqlCommand cmd = new SqlCommand(insertSql, sqlConn))
+                {
+                    cmd.ExecuteNonQuery();
+                }
+            }
+
+            Console.WriteLine($"Inserted {dt.Rows.Count} rows into SQL Server table [{tableName}]");
+        }
+    }
+
+    static string GenerateCreateTableSql(string tableName, DataTable dt)
+    {
+        string cols = string.Join(", ",
+            dt.Columns.Cast<DataColumn>().Select(c => $"[{c.ColumnName}] NVARCHAR(MAX)"));
+
+        return $"IF OBJECT_ID('{tableName}', 'U') IS NULL CREATE TABLE [{tableName}] ({cols});";
+    }
+
+    static string GenerateInsertSql(string tableName, DataTable dt, DataRow row)
+    {
+        string cols = string.Join(", ", dt.Columns.Cast<DataColumn>().Select(c => $"[{c.ColumnName}]"));
+        string vals = string.Join(", ", dt.Columns.Cast<DataColumn>().Select(c => $"'{row[c].ToString().Replace("'", "''")}'"));
+
+        return $"IF NOT EXISTS (SELECT 1 FROM [{tableName}] WHERE {GenerateWhereClause(dt, row)}) " +
+               $"INSERT INTO [{tableName}] ({cols}) VALUES ({vals});";
+    }
+
+    static string GenerateWhereClause(DataTable dt, DataRow row)
+    {
+        return string.Join(" AND ", dt.Columns.Cast<DataColumn>().Select(c =>
+            $"[{c.ColumnName}] = '{row[c].ToString().Replace("'", "''")}'"));
+    }
+
+    static void LogException(Exception ex)
+    {
+        string message = $"[{DateTime.Now}] {ex}\n";
+        File.AppendAllText(logFile, message);
+        Console.WriteLine("Error logged: " + ex.Message);
+    }
+}
+
+
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+  <appSettings>
+    <!-- Folder path where the .db file is located -->
+    <add key="DbFolderPath" value="C:\\Akshat\\Assembly\\DB\\"/>
+    
+    <!-- SQL Server connection string -->
+    <add key="SqlServerConnectionString" 
+         value="Server=PCNA1234;Database=AssemblyDb;User Id=sa;Password=Epcoz@1234;"/>
+    
+    <!-- Interval in minutes to check -->
+    <add key="IntervalMinutes" value="5"/>
+  </appSettings>
+</configuration>
