@@ -1,114 +1,204 @@
 using System;
 using System.Collections.Generic;
-using System.Data.SQLite;
+using System.Configuration;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
+using Microsoft.Data.Sqlite;
 
-class Program
+namespace Assembly3DCamera
 {
-    static void Main(string[] args)
+    class Program
     {
-        string dbFolder = @"C:\YourDBFolder";   // 🔹 Change this path
-        string outputCsv = @"C:\YourOutputFolder\merged.csv"; // 🔹 Final single CSV
-        string trackerFile = @"C:\YourOutputFolder\export_tracker.txt";
+        private static Dictionary<string, long> vLastExportedRowId = new Dictionary<string, long>();
+        private static Timer oTimer;
+        private static string vTrackerFile;
 
-        // dictionary to track last exported row id for each table
-        Dictionary<string, long> lastExportedRowId = LoadTracker(trackerFile);
-
-        while (true)
+        static void Main(string[] args)
         {
-            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} → Checking DB folder...");
+            string vDB_CSD = ConfigurationManager.AppSettings["DB_CSD"],
+                   vCsvFile = ConfigurationManager.AppSettings["Db_CsvFile"],
+                   vLogFile = Path.Combine(vDB_CSD, "exceptions.txt");
 
-            foreach (string dbFile in Directory.GetFiles(dbFolder, "*.db"))
+            if (string.IsNullOrWhiteSpace(vDB_CSD) || string.IsNullOrWhiteSpace(vCsvFile))
             {
-                using (var connection = new SQLiteConnection($"Data Source={dbFile};Version=3;"))
+                Console.WriteLine("Please set DB_CSD and Db_CsvFile in App.config.");
+                return;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(vCsvFile));
+            vTrackerFile = Path.Combine(Path.GetDirectoryName(vCsvFile), "export_tracker.txt");
+
+            if (File.Exists(vTrackerFile))
+            {
+                vLastExportedRowId = LoadTracker(vTrackerFile);
+            }
+
+            oTimer = new Timer(delegate { ExportDbToCsv(vDB_CSD, vCsvFile, vLogFile); }, null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+
+            Console.WriteLine("Export started.");
+            Console.ReadLine();
+        }
+
+        static void ExportDbToCsv(string vDB_CSD, string vCsvPath, string vLogFile)
+        {
+            try
+            {
+                string vDbFile = Directory.GetFiles(vDB_CSD, "*.db")
+                    .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+                    .FirstOrDefault();
+
+                if (vDbFile == null)
                 {
-                    connection.Open();
+                    Console.WriteLine($"[{DateTime.Now}] No .db file found in: " + vDB_CSD);
+                    return;
+                }
 
-                    // get all table names
-                    var cmd = new SQLiteCommand("SELECT name FROM sqlite_master WHERE type='table';", connection);
-                    var reader = cmd.ExecuteReader();
-                    while (reader.Read())
+                using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
+                {
+                    oConn.Open();
+
+                    List<string> vTables = new List<string>();
+                    using (var oTblCmd = oConn.CreateCommand())
                     {
-                        string tableName = reader.GetString(0);
-                        Console.WriteLine($"   Processing table: {tableName}");
-
-                        // check if tracker has entry
-                        if (!lastExportedRowId.ContainsKey(tableName))
-                            lastExportedRowId[tableName] = 0;
-
-                        long lastId = lastExportedRowId[tableName];
-
-                        // fetch only new rows
-                        string sql = $"SELECT rowid, * FROM {tableName} WHERE rowid > {lastId} ORDER BY rowid ASC;";
-                        using (var adapter = new SQLiteDataAdapter(sql, connection))
-                        using (var dt = new System.Data.DataTable())
+                        oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+                        using (var oTblReader = oTblCmd.ExecuteReader())
                         {
-                            adapter.Fill(dt);
+                            while (oTblReader.Read())
+                                vTables.Add(oTblReader.GetString(0));
+                        }
+                    }
 
-                            if (dt.Rows.Count > 0)
+                    // Ensure CSV file exists with headers
+                    if (!File.Exists(vCsvPath))
+                    {
+                        using (var writer = new StreamWriter(vCsvPath, false, Encoding.UTF8))
+                        {
+                            // Write header row (tblName + DB columns)
+                            string firstTable = vTables.FirstOrDefault();
+                            if (firstTable != null)
                             {
-                                bool fileExists = File.Exists(outputCsv);
-
-                                using (var writer = new StreamWriter(outputCsv, true, Encoding.UTF8))
+                                using (var cmd = oConn.CreateCommand())
                                 {
-                                    // if file doesn't exist, write header (tblName + column names)
-                                    if (!fileExists)
+                                    cmd.CommandText = $"SELECT * FROM \"{firstTable}\" LIMIT 1;";
+                                    using (var rdr = cmd.ExecuteReader())
                                     {
-                                        string header = "tblName," + string.Join(",", dt.Columns.Cast<System.Data.DataColumn>().Select(c => c.ColumnName));
-                                        writer.WriteLine(header);
-                                    }
-
-                                    // append new rows
-                                    foreach (System.Data.DataRow row in dt.Rows)
-                                    {
-                                        var values = row.ItemArray.Select(v => v?.ToString().Replace(",", " ")); // avoid CSV issues
-                                        writer.WriteLine(tableName + "," + string.Join(",", values));
+                                        List<string> headers = new List<string> { "tblName" };
+                                        for (int i = 0; i < rdr.FieldCount; i++)
+                                            headers.Add(rdr.GetName(i));
+                                        writer.WriteLine(string.Join(",", headers));
                                     }
                                 }
-
-                                // update last row id
-                                lastExportedRowId[tableName] = Convert.ToInt64(dt.Rows[dt.Rows.Count - 1]["rowid"]);
-
-                                Console.WriteLine($"      → Added {dt.Rows.Count} new rows");
-                            }
-                            else
-                            {
-                                Console.WriteLine("      → No new rows");
                             }
                         }
                     }
+
+                    // Load current CSV into memory
+                    List<string> lines = File.ReadAllLines(vCsvPath).ToList();
+                    string headerLine = lines[0];
+                    Dictionary<string, int> tableInsertPositions = new Dictionary<string, int>();
+
+                    // Find last row position per table in CSV
+                    for (int i = 1; i < lines.Count; i++)
+                    {
+                        string tblName = lines[i].Split(',')[0];
+                        tableInsertPositions[tblName] = i;
+                    }
+
+                    foreach (var vTable in vTables)
+                    {
+                        try
+                        {
+                            ExportTableRows(oConn, vTable, lines, tableInsertPositions);
+                        }
+                        catch (Exception exTable)
+                        {
+                            string vMessage = $"[{DateTime.Now}] Table '{vTable}': {exTable}\n";
+                            File.AppendAllText(vLogFile, vMessage);
+                        }
+                    }
+
+                    File.WriteAllLines(vCsvPath, lines, Encoding.UTF8);
+                }
+
+                SaveTracker(vTrackerFile, vLastExportedRowId);
+                Console.WriteLine($"[{DateTime.Now}] Check complete — all tables processed.");
+            }
+            catch (Exception ex)
+            {
+                File.AppendAllText(vLogFile, $"[{DateTime.Now}] General DB read error: {ex}\n");
+                Console.WriteLine("Error reading DB: " + ex.Message);
+            }
+        }
+
+        static void ExportTableRows(SqliteConnection oConn, string vTable, List<string> lines, Dictionary<string, int> tableInsertPositions)
+        {
+            long vLastRowId = vLastExportedRowId.ContainsKey(vTable) ? vLastExportedRowId[vTable] : 0;
+
+            string vQuery = vLastRowId == 0
+                ? $"SELECT ROWID, * FROM \"{vTable}\";"
+                : $"SELECT ROWID, * FROM \"{vTable}\" WHERE ROWID > {vLastRowId};";
+
+            using (var cmd = oConn.CreateCommand())
+            {
+                cmd.CommandText = vQuery;
+                using (var rdr = cmd.ExecuteReader())
+                {
+                    if (!rdr.HasRows) return;
+
+                    long vMaxRowId = vLastRowId;
+                    List<string> newLines = new List<string>();
+
+                    while (rdr.Read())
+                    {
+                        long vRowId = rdr.GetInt64(0);
+                        vMaxRowId = Math.Max(vMaxRowId, vRowId);
+
+                        List<string> fields = new List<string> { vTable };
+                        for (int i = 1; i < rdr.FieldCount; i++)
+                            fields.Add(rdr.IsDBNull(i) ? "" : EscapeCsvField(rdr.GetValue(i).ToString()));
+
+                        newLines.Add(string.Join(",", fields));
+                    }
+
+                    // Insert new rows after this table's last block
+                    int insertPos = tableInsertPositions.ContainsKey(vTable) ? tableInsertPositions[vTable] + 1 : lines.Count;
+                    lines.InsertRange(insertPos, newLines);
+
+                    // Update tracker
+                    vLastExportedRowId[vTable] = vMaxRowId;
+                    tableInsertPositions[vTable] = insertPos + newLines.Count - 1;
+
+                    Console.WriteLine($"[{DateTime.Now}] Exported {newLines.Count} new rows from '{vTable}'.");
                 }
             }
-
-            // save tracker state
-            SaveTracker(trackerFile, lastExportedRowId);
-
-            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} → Check complete. Next run in 5 minutes.\n");
-            Thread.Sleep(TimeSpan.FromMinutes(5));
         }
-    }
 
-    static Dictionary<string, long> LoadTracker(string trackerFile)
-    {
-        var dict = new Dictionary<string, long>();
-        if (File.Exists(trackerFile))
+        static string EscapeCsvField(string value)
         {
+            if (value == null) return "";
+            bool mustQuote = value.Contains(",") || value.Contains("\"") || value.Contains("\n") || value.Contains("\r");
+            if (value.Contains("\"")) value = value.Replace("\"", "\"\"");
+            return mustQuote ? $"\"{value}\"" : value;
+        }
+
+        static Dictionary<string, long> LoadTracker(string trackerFile)
+        {
+            var dict = new Dictionary<string, long>();
             foreach (var line in File.ReadAllLines(trackerFile))
             {
                 var parts = line.Split('=');
                 if (parts.Length == 2 && long.TryParse(parts[1], out long rowId))
                     dict[parts[0]] = rowId;
             }
+            return dict;
         }
-        return dict;
-    }
 
-    static void SaveTracker(string trackerFile, Dictionary<string, long> data)
-    {
-        var lines = data.Select(kvp => $"{kvp.Key}={kvp.Value}");
-        File.WriteAllLines(trackerFile, lines);
+        static void SaveTracker(string trackerFile, Dictionary<string, long> data)
+        {
+            var lines = data.Select(kvp => $"{kvp.Key}={kvp.Value}");
+            File.WriteAllLines(trackerFile, lines);
+        }
     }
 }
