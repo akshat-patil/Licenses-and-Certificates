@@ -133,47 +133,53 @@ namespace Assembly3DCamera
         }
 
         static void ExportTableRows(SqliteConnection oConn, string vTable, List<string> lines, Dictionary<string, int> tableInsertPositions)
+{
+    long vLastRowId = vLastExportedRowId.ContainsKey(vTable) ? vLastExportedRowId[vTable] : 0;
+
+    string vQuery = vLastRowId == 0
+        ? $"SELECT ROWID, * FROM \"{vTable}\";"
+        : $"SELECT ROWID, * FROM \"{vTable}\" WHERE ROWID > {vLastRowId};";
+
+    using (var cmd = oConn.CreateCommand())
+    {
+        cmd.CommandText = vQuery;
+        using (var rdr = cmd.ExecuteReader())
         {
-            long vLastRowId = vLastExportedRowId.ContainsKey(vTable) ? vLastExportedRowId[vTable] : 0;
+            if (!rdr.HasRows) return;
 
-            string vQuery = vLastRowId == 0
-                ? $"SELECT ROWID, * FROM \"{vTable}\";"
-                : $"SELECT ROWID, * FROM \"{vTable}\" WHERE ROWID > {vLastRowId};";
+            long vMaxRowId = vLastRowId;
+            List<string> newLines = new List<string>();
 
-            using (var cmd = oConn.CreateCommand())
+            while (rdr.Read())
             {
-                cmd.CommandText = vQuery;
-                using (var rdr = cmd.ExecuteReader())
-                {
-                    if (!rdr.HasRows) return;
+                long vRowId = rdr.GetInt64(0);
+                vMaxRowId = Math.Max(vMaxRowId, vRowId);
 
-                    long vMaxRowId = vLastRowId;
-                    List<string> newLines = new List<string>();
+                List<string> fields = new List<string> { vTable };
+                for (int i = 1; i < rdr.FieldCount; i++)
+                    fields.Add(rdr.IsDBNull(i) ? "" : EscapeCsvField(rdr.GetValue(i).ToString()));
 
-                    while (rdr.Read())
-                    {
-                        long vRowId = rdr.GetInt64(0);
-                        vMaxRowId = Math.Max(vMaxRowId, vRowId);
-
-                        List<string> fields = new List<string> { vTable };
-                        for (int i = 1; i < rdr.FieldCount; i++)
-                            fields.Add(rdr.IsDBNull(i) ? "" : EscapeCsvField(rdr.GetValue(i).ToString()));
-
-                        newLines.Add(string.Join(",", fields));
-                    }
-
-                    // Insert new rows after this table's last block
-                    int insertPos = tableInsertPositions.ContainsKey(vTable) ? tableInsertPositions[vTable] + 1 : lines.Count;
-                    lines.InsertRange(insertPos, newLines);
-
-                    // Update tracker
-                    vLastExportedRowId[vTable] = vMaxRowId;
-                    tableInsertPositions[vTable] = insertPos + newLines.Count - 1;
-
-                    Console.WriteLine($"[{DateTime.Now}] Exported {newLines.Count} new rows from '{vTable}'.");
-                }
+                newLines.Add(string.Join(",", fields));
             }
+
+            // ✅ If table already exists, insert after its last known row
+            // ✅ If table is new, append at the very end
+            int insertPos;
+            if (tableInsertPositions.ContainsKey(vTable))
+                insertPos = tableInsertPositions[vTable] + 1;
+            else
+                insertPos = lines.Count;
+
+            lines.InsertRange(insertPos, newLines);
+
+            // update trackers
+            vLastExportedRowId[vTable] = vMaxRowId;
+            tableInsertPositions[vTable] = insertPos + newLines.Count - 1;
+
+            Console.WriteLine($"[{DateTime.Now}] Exported {newLines.Count} rows from '{vTable}'.");
         }
+    }
+}
 
         static string EscapeCsvField(string value)
         {
