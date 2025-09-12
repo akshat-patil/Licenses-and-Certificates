@@ -1,0 +1,172 @@
+What is this.
+This is my console app code till now
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+class Program
+{
+private static Dictionary<string, long> vLastExportedRowId = new Dictionary<string, long>();
+private static Timer oTimer;
+
+static void Main(string[] args)  
+    {  
+        string vDB_CSD = ConfigurationManager.AppSettings["DB_CSD"], vDb_Csv = ConfigurationManager.AppSettings["Db_Csv"], vLogFile = Path.Combine(vDB_CSD, "exceptions.txt");  
+
+        if (string.IsNullOrWhiteSpace(vDB_CSD) || string.IsNullOrWhiteSpace(vDb_Csv))  
+        {  
+            Console.WriteLine("Please set DB_CSD and Db_Csv in App.config.");  
+            return;  
+        }  
+
+        Directory.CreateDirectory(vDb_Csv);  
+
+        oTimer = new Timer(delegate { ExportDbToCsv(vDB_CSD, vDb_Csv, vLogFile); }, null, TimeSpan.Zero, TimeSpan.FromMinutes(5));  
+
+        Console.WriteLine("Export started.");  
+        Console.ReadLine();  
+    }  
+    static void ExportDbToCsv(string vDB_CSD, string vDb_Csv, string vLogFile)  
+    {  
+        try  
+        {  
+            string vDbFile = Directory.GetFiles(vDB_CSD, "*.db")  
+                .OrderByDescending(f => new FileInfo(f).LastWriteTime)  
+                .FirstOrDefault();  
+
+            if (vDbFile == null)  
+            {  
+                Console.WriteLine($"[{DateTime.Now}] No .db file found in: " + vDB_CSD);  
+                return;  
+            }  
+
+            using (var oConn = new SqliteConnection("Data Source=" + vDbFile))  
+            {  
+                oConn.Open();  
+
+                using (var oTblCmd = oConn.CreateCommand())  
+                {  
+                    oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";  
+
+                    using (var oTblReader = oTblCmd.ExecuteReader())  
+                    {  
+                        List<string> vTables = new List<string>();  
+                        while (oTblReader.Read())  
+                            vTables.Add(oTblReader.GetString(0));  
+
+                        foreach (string vTable in vTables)  
+                        {  
+                            try  
+                            {  
+                                ExportTableToCsv(oConn, vTable, vDb_Csv, vLogFile);  
+                            }  
+                            catch (Exception exTable)  
+                            {  
+                                string vMessage = $"[{DateTime.Now}] Table '{vTable}': {exTable}\n";  
+                                File.AppendAllText(vLogFile, vMessage);  
+                            }  
+                        }  
+                    }  
+                }  
+            }  
+
+            Console.WriteLine($"[{DateTime.Now}] Check complete — all tables processed.");  
+        }  
+        catch (Exception ex)  
+        {  
+            File.AppendAllText(vLogFile, $"[{DateTime.Now}] General DB read error: {ex}\n");  
+            Console.WriteLine("Error reading DB: " + ex.Message);  
+        }  
+    }  
+
+    static void ExportTableToCsv(SqliteConnection oConn, string vTableName, string vCsvFolderPath, string vLogFile)  
+    {  
+        string vSafeTable = vTableName.Replace("\"", "\"\""), vCsvFileName = SanitizeFileName(vTableName) + ".csv", vCsvPath = Path.Combine(vCsvFolderPath, vCsvFileName);  
+
+        long vLastRowId = 0;  
+        if (vLastExportedRowId.ContainsKey(vTableName))  
+            vLastRowId = vLastExportedRowId[vTableName];  
+
+        string vQuery = vLastRowId == 0  
+            ? $"SELECT ROWID, * FROM \"{vSafeTable}\";"  
+            : $"SELECT ROWID, * FROM \"{vSafeTable}\" WHERE ROWID > {vLastRowId};";  
+
+        using (var oCmd = oConn.CreateCommand())  
+        {  
+            oCmd.CommandText = vQuery;  
+            using (var oReader = oCmd.ExecuteReader())  
+            {  
+                if (!oReader.HasRows) return;  
+
+                using (var oWriter = new StreamWriter(vCsvPath, File.Exists(vCsvPath), Encoding.UTF8))  
+                {  
+                    int vCols = oReader.FieldCount;  
+
+                    if (!File.Exists(vCsvPath))  
+                    {  
+                        for (int i = 1; i < vCols; i++)   
+                        {  
+                            if (i > 1) oWriter.Write(",");  
+                            oWriter.Write(EscapeCsvField(oReader.GetName(i)));  
+                        }  
+                        oWriter.WriteLine();  
+                    }  
+
+                    long vMaxRowId = vLastRowId;  
+                    int vRowCount = 0;  
+
+                    while (oReader.Read())  
+                    {  
+                        long vRowId = oReader.GetInt64(0);  
+                        vMaxRowId = Math.Max(vMaxRowId, vRowId);  
+
+                        for (int i = 1; i < vCols; i++)   
+                        {  
+                            if (i > 1) oWriter.Write(",");  
+                            if (oReader.IsDBNull(i))  
+                                oWriter.Write("");  
+                            else  
+                                oWriter.Write(EscapeCsvField(oReader.GetValue(i).ToString()));  
+                        }  
+                        oWriter.WriteLine();  
+                        vRowCount++;  
+                    }  
+
+                    vLastExportedRowId[vTableName] = vMaxRowId;  
+                    Console.WriteLine($"[{DateTime.Now}] Exported {vRowCount} new rows from '{vTableName}' → {vCsvPath}");  
+                }  
+            }  
+        }  
+    }  
+
+    static string EscapeCsvField(string vValue)  
+    {  
+        if (vValue == null) return "";  
+        bool vMustQuote = vValue.Contains(",") || vValue.Contains("\"") || vValue.Contains("\n") || vValue.Contains("\r");  
+        if (vValue.Contains("\"")) vValue = vValue.Replace("\"", "\"\"");  
+        return vMustQuote ? $"\"{vValue}\"" : vValue;  
+    }  
+
+    static string SanitizeFileName(string vName)  
+    {  
+        var vInvalid = Path.GetInvalidFileNameChars();  
+        var oSb = new StringBuilder();  
+        foreach (var vChar in vName)  
+        {  
+            oSb.Append(vInvalid.Contains(vChar) ? '_' : vChar);  
+        }  
+        return oSb.ToString();  
+    }  
+}
+
+}
+
+Now there is change, instead of different CSV files, make only 1 CSV files with multiple sheets, with the table name as the sheet name. And in this code, the column headers are not there, fix it also. Also when there should be no duplicate data, means when I run the code, the CSV files are created and Data is inserted. But when I stop and rerun it, the data gets appended again in the columns. Give proper fixed code
+
