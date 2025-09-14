@@ -1,0 +1,338 @@
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    class Program
+    {
+        private static Dictionary<string, long> vLastExportedRowId = new Dictionary<string, long>();
+        private static Timer oTimer;
+
+        static void Main(string[] args)
+        {
+            string vDB_CSD = ConfigurationManager.AppSettings["DB_CSD"],
+                   vDb_Csv = ConfigurationManager.AppSettings["Db_Csv"],
+                   vLogFile = Path.Combine(vDB_CSD, "exceptions.txt"),
+                   vCheckpointFile = Path.Combine(vDB_CSD, "data.txt");
+
+            if (string.IsNullOrWhiteSpace(vDB_CSD) || string.IsNullOrWhiteSpace(vDb_Csv))
+            {
+                Console.WriteLine("Please set DB_CSD and Db_Csv in App.config.");
+                return;
+            }
+
+            Directory.CreateDirectory(vDb_Csv);
+
+            if (!File.Exists(vLogFile))
+                File.Create(vLogFile).Dispose();
+
+            // Load checkpoints from data.txt
+            vLastExportedRowId = DataHelper.LoadCheckpoints(vCheckpointFile);
+
+            oTimer = new Timer(delegate { ExportDb(vDB_CSD, vDb_Csv, vLogFile, vCheckpointFile); },
+                               null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+
+            Console.WriteLine("Export started.");
+            Console.ReadLine();
+        }
+
+        static void ExportDb(string vDB_CSD, string vDb_Csv, string vLogFile, string vCheckpointFile)
+        {
+            try
+            {
+                string vDbFile = Directory.GetFiles(vDB_CSD, "*.db")
+                    .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+                    .FirstOrDefault();
+
+                if (vDbFile == null)
+                {
+                    Console.WriteLine($"[{DateTime.Now}] No .db file found in: " + vDB_CSD);
+                    return;
+                }
+
+                string dbKey = Path.GetFileName(vDbFile);
+
+                using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
+                {
+                    oConn.Open();
+
+                    using (var oTblCmd = oConn.CreateCommand())
+                    {
+                        oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+
+                        using (var oTblReader = oTblCmd.ExecuteReader())
+                        {
+                            List<string> vTables = new List<string>();
+                            while (oTblReader.Read())
+                                vTables.Add(oTblReader.GetString(0));
+
+                            foreach (string vTable in vTables)
+                            {
+                                try
+                                {
+                                    // Export to CSV
+                                    DataHelper.ExportTableToCsv(oConn, vTable, vDb_Csv, vLogFile, dbKey, vLastExportedRowId);
+
+                                    // Export to SQL Server
+                                    DatabaseHelper.ExportTableToSql(oConn, vTable, dbKey, vLogFile, vLastExportedRowId);
+                                }
+                                catch (Exception exTable)
+                                {
+                                    string vMessage = $"[{DateTime.Now}] Table '{vTable}': {exTable}\n";
+                                    File.AppendAllText(vLogFile, vMessage);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                DataHelper.SaveCheckpoints(vCheckpointFile, vLastExportedRowId);
+
+                Console.WriteLine($"[{DateTime.Now}] Check complete — all tables processed.");
+            }
+            catch (Exception ex)
+            {
+                File.AppendAllText(vLogFile, $"[{DateTime.Now}] General DB read error: {ex}\n");
+                Console.WriteLine("Error reading DB: " + ex.Message);
+            }
+        }
+    }
+}
+---------------------------------------
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    public static class DataHelper
+    {
+        public static Dictionary<string, long> LoadCheckpoints(string checkpointFile)
+        {
+            var dict = new Dictionary<string, long>();
+            if (!File.Exists(checkpointFile)) return dict;
+
+            foreach (var line in File.ReadAllLines(checkpointFile))
+            {
+                var parts = line.Split('|');
+                if (parts.Length == 2 && long.TryParse(parts[1], out long id))
+                {
+                    dict[parts[0]] = id;
+                }
+            }
+            return dict;
+        }
+
+        public static void SaveCheckpoints(string checkpointFile, Dictionary<string, long> checkpoints)
+        {
+            var lines = checkpoints.Select(kv => kv.Key + "|" + kv.Value);
+            File.WriteAllLines(checkpointFile, lines);
+        }
+
+        public static void ExportTableToCsv(SqliteConnection oConn, string vTableName, string vCsvFolderPath,
+                                            string vLogFile, string dbKey, Dictionary<string, long> checkpoints)
+        {
+            string vSafeTable = vTableName.Replace("\"", "\"\"");
+
+            string checkpointKey = dbKey + "|" + vTableName;
+            long vLastRowId = checkpoints.ContainsKey(checkpointKey) ? checkpoints[checkpointKey] : 0;
+
+            string vQuery = vLastRowId == 0
+                ? $"SELECT ROWID, * FROM \"{vSafeTable}\";"
+                : $"SELECT ROWID, * FROM \"{vSafeTable}\" WHERE ROWID > {vLastRowId};";
+
+            using (var oCmd = oConn.CreateCommand())
+            {
+                oCmd.CommandText = vQuery;
+                using (var oReader = oCmd.ExecuteReader())
+                {
+                    if (!oReader.HasRows) return;
+
+                    // Generate new filename with timestamp
+                    string timestamp = DateTime.Now.ToString("ddMMyy_HHmmss");
+                    string vCsvFileName = $"{SanitizeFileName(vTableName)}_{timestamp}.csv";
+                    string vCsvPath = Path.Combine(vCsvFolderPath, vCsvFileName);
+
+                    using (var oWriter = new StreamWriter(vCsvPath, false, Encoding.UTF8))
+                    {
+                        int vCols = oReader.FieldCount;
+
+                        // Write headers
+                        for (int i = 1; i < vCols; i++)
+                        {
+                            if (i > 1) oWriter.Write(",");
+                            oWriter.Write(EscapeCsvField(oReader.GetName(i)));
+                        }
+                        oWriter.WriteLine();
+
+                        long vMaxRowId = vLastRowId;
+                        int vRowCount = 0;
+
+                        while (oReader.Read())
+                        {
+                            long vRowId = oReader.GetInt64(0);
+                            vMaxRowId = Math.Max(vMaxRowId, vRowId);
+
+                            for (int i = 1; i < vCols; i++)
+                            {
+                                if (i > 1) oWriter.Write(",");
+                                if (oReader.IsDBNull(i))
+                                    oWriter.Write("");
+                                else
+                                    oWriter.Write(EscapeCsvField(oReader.GetValue(i).ToString()));
+                            }
+                            oWriter.WriteLine();
+                            vRowCount++;
+                        }
+
+                        checkpoints[checkpointKey] = vMaxRowId;
+                        Console.WriteLine($"[{DateTime.Now}] Exported {vRowCount} new rows from '{vTableName}' → {vCsvPath}");
+                    }
+                }
+            }
+        }
+
+        private static string EscapeCsvField(string vValue)
+        {
+            if (vValue == null) return "";
+            bool vMustQuote = vValue.Contains(",") || vValue.Contains("\"") || vValue.Contains("\n") || vValue.Contains("\r");
+            if (vValue.Contains("\"")) vValue = vValue.Replace("\"", "\"\"");
+            return vMustQuote ? $"\"{vValue}\"" : vValue;
+        }
+
+        private static string SanitizeFileName(string vName)
+        {
+            var vInvalid = Path.GetInvalidFileNameChars();
+            var oSb = new StringBuilder();
+            foreach (var vChar in vName)
+            {
+                oSb.Append(vInvalid.Contains(vChar) ? '_' : vChar);
+            }
+            return oSb.ToString();
+        }
+    }
+}
+-------------+-------+----
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data.SqlClient;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    public static class DatabaseHelper
+    {
+        public static void ExportTableToSql(SqliteConnection oConn, string vTableName, string dbKey,
+                                            string vLogFile, Dictionary<string, long> checkpoints)
+        {
+            string checkpointKey = "SQL|" + dbKey + "|" + vTableName;
+            long vLastRowId = checkpoints.ContainsKey(checkpointKey) ? checkpoints[checkpointKey] : 0;
+
+            string vQuery = vLastRowId == 0
+                ? $"SELECT ROWID, * FROM \"{vTableName}\";"
+                : $"SELECT ROWID, * FROM \"{vTableName}\" WHERE ROWID > {vLastRowId};";
+
+            using (var oCmd = oConn.CreateCommand())
+            {
+                oCmd.CommandText = vQuery;
+                using (var oReader = oCmd.ExecuteReader())
+                {
+                    if (!oReader.HasRows) return;
+
+                    string timestamp = DateTime.Now.ToString("ddMMyy_HHmmss");
+                    string sqlTableName = $"{vTableName}_{timestamp}";
+
+                    string connStr = ConfigurationManager.AppSettings["SqlServerConn"];
+                    using (var sqlConn = new SqlConnection(connStr))
+                    {
+                        sqlConn.Open();
+
+                        // Create table if not exists
+                        CreateSqlTable(sqlConn, oReader, sqlTableName);
+
+                        long vMaxRowId = vLastRowId;
+                        int vRowCount = 0;
+
+                        while (oReader.Read())
+                        {
+                            long vRowId = oReader.GetInt64(0);
+                            vMaxRowId = Math.Max(vMaxRowId, vRowId);
+
+                            InsertRow(sqlConn, sqlTableName, oReader);
+                            vRowCount++;
+                        }
+
+                        checkpoints[checkpointKey] = vMaxRowId;
+                        Console.WriteLine($"[{DateTime.Now}] Exported {vRowCount} rows → SQL Server table {sqlTableName}");
+                    }
+                }
+            }
+        }
+
+        private static void CreateSqlTable(SqlConnection sqlConn, SqliteDataReader reader, string sqlTableName)
+        {
+            using (var cmd = sqlConn.CreateCommand())
+            {
+                List<string> cols = new List<string>();
+                for (int i = 1; i < reader.FieldCount; i++)
+                {
+                    string colName = reader.GetName(i);
+                    cols.Add($"[{colName}] NVARCHAR(MAX)");
+                }
+
+                cmd.CommandText = $"IF OBJECT_ID('{sqlTableName}', 'U') IS NULL " +
+                                  $"CREATE TABLE [{sqlTableName}] ({string.Join(",", cols)});";
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        private static void InsertRow(SqlConnection sqlConn, string sqlTableName, SqliteDataReader reader)
+        {
+            List<string> colNames = new List<string>();
+            List<string> colParams = new List<string>();
+            var values = new List<SqlParameter>();
+
+            for (int i = 1; i < reader.FieldCount; i++)
+            {
+                string colName = reader.GetName(i);
+                colNames.Add($"[{colName}]");
+                colParams.Add($"@p{i}");
+
+                object val = reader.IsDBNull(i) ? DBNull.Value : reader.GetValue(i);
+                values.Add(new SqlParameter($"@p{i}", val));
+            }
+
+            string sql = $"INSERT INTO [{sqlTableName}] ({string.Join(",", colNames)}) VALUES ({string.Join(",", colParams)});";
+
+            using (var cmd = new SqlCommand(sql, sqlConn))
+            {
+                cmd.Parameters.AddRange(values.ToArray());
+                cmd.ExecuteNonQuery();
+            }
+        }
+    }
+}
+----------
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+  <appSettings>
+    <!-- Folder containing .db files -->
+    <add key="DB_CSD" value="C:\Path\To\DbFolder" />
+    
+    <!-- Folder for CSV exports -->
+    <add key="Db_Csv" value="C:\Path\To\CsvFolder" />
+    
+    <!-- SQL Server connection -->
+    <add key="SqlServerConn" value="Server=YOUR_SERVER;Database=YOUR_DB;User Id=USERNAME;Password=PASSWORD;" />
+  </appSettings>
+</configuration>
