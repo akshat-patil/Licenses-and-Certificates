@@ -1,0 +1,361 @@
+
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+  <appSettings>
+    <add key="DbFolder" value="C:\Path\To\DbFolder" />
+    <add key="OutputFolder" value="C:\Path\To\OutputFolder" />
+  </appSettings>
+
+  <connectionStrings>
+    <add name="SqlServerConn" connectionString="Server=YOUR_SERVER;Database=YOUR_DB;Trusted_Connection=True;" providerName="System.Data.SqlClient"/>
+  </connectionStrings>
+</configuration>
+
+
+-------
+
+using System;
+using System.Threading;
+
+namespace Assembly3DCamera
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            try
+            {
+                Console.WriteLine("Starting DB to CSV & SQL Server Sync...");
+
+                while (true)
+                {
+                    try
+                    {
+                        // Export data from .db to CSV
+                        Data.ExportDataToCsv();
+
+                        // Export data from .db to SQL Server
+                        Database.ExportDataToSqlServer();
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogException(ex);
+                    }
+
+                    Console.WriteLine("Waiting 5 minutes before next check...");
+                    Thread.Sleep(TimeSpan.FromMinutes(5));
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogException(ex);
+            }
+        }
+    }
+}
+
+
+----------
+
+
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data;
+using System.IO;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    public static class Data
+    {
+        private static readonly string DbFolder = ConfigurationManager.AppSettings["DbFolder"];
+        private static readonly string OutputFolder = ConfigurationManager.AppSettings["OutputFolder"];
+        private static readonly string DataLogFile = Path.Combine(OutputFolder, "data.txt");
+
+        public static void ExportDataToCsv()
+        {
+            foreach (string dbFile in Directory.GetFiles(DbFolder, "*.db"))
+            {
+                try
+                {
+                    using (var connection = new SqliteConnection($"Data Source={dbFile}"))
+                    {
+                        connection.Open();
+
+                        DataTable tables = connection.GetSchema("Tables");
+
+                        foreach (DataRow row in tables.Rows)
+                        {
+                            string tableName = row["TABLE_NAME"].ToString();
+                            string csvFilePath = Path.Combine(OutputFolder, $"{tableName}.csv");
+
+                            // Ensure data.txt exists
+                            if (!File.Exists(DataLogFile)) File.WriteAllText(DataLogFile, "");
+
+                            var lastProcessedIds = LoadProcessedIds();
+
+                            using (var cmd = connection.CreateCommand())
+                            {
+                                cmd.CommandText = $"SELECT * FROM {tableName}";
+                                using (var reader = cmd.ExecuteReader())
+                                {
+                                    var newRows = new List<string>();
+                                    var headerWritten = File.Exists(csvFilePath);
+
+                                    using (var sw = new StreamWriter(csvFilePath, true))
+                                    {
+                                        if (!headerWritten)
+                                        {
+                                            // Write header
+                                            var header = new List<string>();
+                                            for (int i = 0; i < reader.FieldCount; i++)
+                                                header.Add(reader.GetName(i));
+                                            sw.WriteLine(string.Join(",", header));
+                                        }
+
+                                        while (reader.Read())
+                                        {
+                                            string rowData = "";
+                                            for (int i = 0; i < reader.FieldCount; i++)
+                                            {
+                                                rowData += reader[i]?.ToString().Replace(",", ";") + ",";
+                                            }
+                                            rowData = rowData.TrimEnd(',');
+
+                                            string uniqueKey = $"{tableName}:{rowData.GetHashCode()}";
+
+                                            if (!lastProcessedIds.Contains(uniqueKey))
+                                            {
+                                                sw.WriteLine(rowData);
+                                                newRows.Add(uniqueKey);
+                                            }
+                                        }
+                                    }
+
+                                    if (newRows.Count > 0)
+                                    {
+                                        AppendProcessedIds(newRows);
+                                        Logger.LogInfo($"{newRows.Count} new rows appended in {tableName}.csv");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogException(ex);
+                }
+            }
+        }
+
+        private static HashSet<string> LoadProcessedIds()
+        {
+            var ids = new HashSet<string>();
+            if (File.Exists(DataLogFile))
+            {
+                foreach (var line in File.ReadAllLines(DataLogFile))
+                {
+                    ids.Add(line.Trim());
+                }
+            }
+            return ids;
+        }
+
+        private static void AppendProcessedIds(IEnumerable<string> newIds)
+        {
+            using (var sw = new StreamWriter(DataLogFile, true))
+            {
+                foreach (var id in newIds)
+                {
+                    sw.WriteLine(id);
+                }
+            }
+        }
+    }
+}
+
+
+------------
+
+
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data;
+using System.Data.SqlClient;
+using System.IO;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    public static class Database
+    {
+        private static readonly string DbFolder = ConfigurationManager.AppSettings["DbFolder"];
+        private static readonly string SqlConnectionString = ConfigurationManager.ConnectionStrings["SqlServerConn"].ConnectionString;
+        private static readonly string DataLogFile = Path.Combine(ConfigurationManager.AppSettings["OutputFolder"], "data.txt");
+
+        public static void ExportDataToSqlServer()
+        {
+            foreach (string dbFile in Directory.GetFiles(DbFolder, "*.db"))
+            {
+                try
+                {
+                    using (var sqliteConn = new SqliteConnection($"Data Source={dbFile}"))
+                    {
+                        sqliteConn.Open();
+                        DataTable tables = sqliteConn.GetSchema("Tables");
+
+                        foreach (DataRow row in tables.Rows)
+                        {
+                            string tableName = row["TABLE_NAME"].ToString();
+
+                            var lastProcessedIds = LoadProcessedIds();
+
+                            using (var sqliteCmd = sqliteConn.CreateCommand())
+                            {
+                                sqliteCmd.CommandText = $"SELECT * FROM {tableName}";
+                                using (var reader = sqliteCmd.ExecuteReader())
+                                {
+                                    using (var sqlConn = new SqlConnection(SqlConnectionString))
+                                    {
+                                        sqlConn.Open();
+
+                                        // Create table if not exists
+                                        CreateTableIfNotExists(sqlConn, reader, tableName);
+
+                                        var newRows = new List<string>();
+
+                                        while (reader.Read())
+                                        {
+                                            string rowData = "";
+                                            for (int i = 0; i < reader.FieldCount; i++)
+                                                rowData += reader[i]?.ToString().Replace(",", ";") + ",";
+                                            rowData = rowData.TrimEnd(',');
+
+                                            string uniqueKey = $"{tableName}:{rowData.GetHashCode()}";
+
+                                            if (!lastProcessedIds.Contains(uniqueKey))
+                                            {
+                                                InsertRow(sqlConn, reader, tableName);
+                                                newRows.Add(uniqueKey);
+                                            }
+                                        }
+
+                                        if (newRows.Count > 0)
+                                        {
+                                            AppendProcessedIds(newRows);
+                                            Logger.LogInfo($"{newRows.Count} new rows inserted in {tableName} (SQL Server).");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogException(ex);
+                }
+            }
+        }
+
+        private static void CreateTableIfNotExists(SqlConnection conn, IDataReader reader, string tableName)
+        {
+            var columnDefs = new List<string>();
+            for (int i = 0; i < reader.FieldCount; i++)
+            {
+                columnDefs.Add($"[{reader.GetName(i)}] NVARCHAR(MAX)");
+            }
+
+            string createTableSql = $@"
+                IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='{tableName}' AND xtype='U')
+                CREATE TABLE [{tableName}] ({string.Join(",", columnDefs)})";
+
+            using (var cmd = new SqlCommand(createTableSql, conn))
+            {
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        private static void InsertRow(SqlConnection conn, IDataReader reader, string tableName)
+        {
+            var columns = new List<string>();
+            var values = new List<string>();
+
+            for (int i = 0; i < reader.FieldCount; i++)
+            {
+                columns.Add($"[{reader.GetName(i)}]");
+                values.Add($"@p{i}");
+            }
+
+            string insertSql = $"INSERT INTO [{tableName}] ({string.Join(",", columns)}) VALUES ({string.Join(",", values)})";
+
+            using (var cmd = new SqlCommand(insertSql, conn))
+            {
+                for (int i = 0; i < reader.FieldCount; i++)
+                {
+                    cmd.Parameters.AddWithValue($"@p{i}", reader[i] ?? DBNull.Value);
+                }
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        private static HashSet<string> LoadProcessedIds()
+        {
+            var ids = new HashSet<string>();
+            if (File.Exists(DataLogFile))
+            {
+                foreach (var line in File.ReadAllLines(DataLogFile))
+                {
+                    ids.Add(line.Trim());
+                }
+            }
+            return ids;
+        }
+
+        private static void AppendProcessedIds(IEnumerable<string> newIds)
+        {
+            using (var sw = new StreamWriter(DataLogFile, true))
+            {
+                foreach (var id in newIds)
+                {
+                    sw.WriteLine(id);
+                }
+            }
+        }
+    }
+}
+
+
+
+--------------
+
+
+using System;
+using System.IO;
+
+namespace Assembly3DCamera
+{
+    public static class Logger
+    {
+        private static readonly string LogFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "exceptions.txt");
+
+        public static void LogException(Exception ex)
+        {
+            using (var sw = new StreamWriter(LogFile, true))
+            {
+                sw.WriteLine($"[{DateTime.Now}] ERROR: {ex}");
+            }
+        }
+
+        public static void LogInfo(string message)
+        {
+            using (var sw = new StreamWriter(LogFile, true))
+            {
+                sw.WriteLine($"[{DateTime.Now}] INFO: {message}");
+            }
+        }
+    }
+}
