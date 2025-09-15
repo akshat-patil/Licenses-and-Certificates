@@ -1,520 +1,345 @@
-<configuration>
-  <appSettings>
-    <add key="EMS_CsvFolder" value="C:\Users\YourUser\Desktop\EMS_CsvFiles"/>
-    <add key="EMS_ExcelFolder" value="C:\Users\YourUser\Desktop\EMS_ExcelFiles"/>
-    <add key="EMS_SqlConnection" value="Server=.\SQLEXPRESS;Database=EmsDb;User Id=sa;Password=YourPassword;"/>
-  </appSettings>
-</configuration>
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data.SqlClient;
+using Microsoft.Data.Sqlite;
+using System.IO;
+
+namespace Assembly3DCamera
+{
+    public static class DatabaseHelper
+    {
+        public static void ExportTableToSql(SqliteConnection oConn, string vTableName, string dbKey,
+                                    string vLogFile, string vCheckpointFile,
+                                    Dictionary<string, long> checkpoints)
+        {
+            string checkpointKey = "SQL|" + dbKey + "|" + vTableName;
+            long vLastRowId = checkpoints.ContainsKey(checkpointKey) ? checkpoints[checkpointKey] : 0;
+
+            string vQuery = $"SELECT ROWID, * FROM \"{vTableName}\" WHERE ROWID > {vLastRowId};";
+
+            using (var oCmd = oConn.CreateCommand())
+            {
+                oCmd.CommandText = vQuery;
+                using (var oReader = oCmd.ExecuteReader())
+                {
+                    if (!oReader.HasRows) return;
+
+                    string sqlTableName = vTableName;
+                    string connStr = ConfigurationManager.AppSettings["SqlServerConn"];
+
+                    using (var sqlConn = new SqlConnection(connStr))
+                    {
+                        sqlConn.Open();
+                        CreateSqlTable(sqlConn, oReader, sqlTableName);
+
+                        long vMaxRowId = vLastRowId;
+                        int vRowCount = 0;
+                        while (oReader.Read())
+                        {
+                            long vRowId = oReader.GetInt64(0);
+                            vMaxRowId = Math.Max(vMaxRowId, vRowId);
+                            InsertRow(sqlConn, sqlTableName, oReader);
+                            vRowCount++;
+                        }
+
+                        checkpoints[checkpointKey] = vMaxRowId;
+                        Console.WriteLine($"[{DateTime.Now}] Exported {vRowCount} rows to SQL Server table {sqlTableName}");
+
+                        if (vRowCount > 0)
+                        {
+                            string logEntry = $"{DateTime.Now}: {vRowCount} new entries came in table {vTableName}\n";
+                            File.AppendAllText(vCheckpointFile, logEntry);
+                        }
+                    }
+                }
+            }
+        }
 
 
 
+        private static void CreateSqlTable(SqlConnection sqlConn, SqliteDataReader reader, string sqlTableName)
+        {
+            using (var cmd = sqlConn.CreateCommand())
+            {
+                List<string> cols = new List<string>();
+                for (int i = 1; i < reader.FieldCount; i++)
+                {
+                    string colName = reader.GetName(i);
+                    cols.Add($"[{colName}] NVARCHAR(MAX)");
+                }
 
+                cmd.CommandText = $"IF OBJECT_ID('{sqlTableName}', 'U') IS NULL " +
+                                  $"CREATE TABLE [{sqlTableName}] ({string.Join(",", cols)});";
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        private static void InsertRow(SqlConnection sqlConn, string sqlTableName, SqliteDataReader reader)
+        {
+            List<string> colNames = new List<string>();
+            List<string> colParams = new List<string>();
+            var values = new List<SqlParameter>();
+
+            for (int i = 1; i < reader.FieldCount; i++)
+            {
+                string colName = reader.GetName(i);
+                colNames.Add($"[{colName}]");
+                colParams.Add($"@p{i}");
+                object val = reader.IsDBNull(i) ? DBNull.Value : reader.GetValue(i);
+                values.Add(new SqlParameter($"@p{i}", val ?? DBNull.Value));
+            }
+
+            string sql = $"INSERT INTO [{sqlTableName}] ({string.Join(",", colNames)}) VALUES ({string.Join(",", colParams)});";
+            using (var cmd = new SqlCommand(sql, sqlConn))
+            {
+                cmd.Parameters.AddRange(values.ToArray());
+                cmd.ExecuteNonQuery();
+            }
+        }
+    }
+}
 
 
 
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    public static class DataHelper
+    {
+        // Loads checkpoints from file; format expected: key|value per line.
+        public static Dictionary<string, long> LoadCheckpoints(string checkpointFile)
+        {
+            var dict = new Dictionary<string, long>();
+            if (!File.Exists(checkpointFile)) return dict;
+
+            foreach (var rawLine in File.ReadAllLines(checkpointFile))
+            {
+                var line = rawLine.Trim();
+                if (string.IsNullOrEmpty(line)) continue;
+
+                // split by last '|' so keys can themselves contain '|' characters
+                int lastPipe = line.LastIndexOf('|');
+                if (lastPipe <= 0) continue;
+
+                string key = line.Substring(0, lastPipe);
+                string valStr = line.Substring(lastPipe + 1);
+
+                if (long.TryParse(valStr, out long val))
+                    dict[key] = val;
+            }
+            return dict;
+        }
+
+        public static void SaveCheckpoints(string checkpointFile, Dictionary<string, long> checkpoints)
+        {
+            var lines = checkpoints.Select(kv => kv.Key + "|" + kv.Value);
+            File.WriteAllLines(checkpointFile, lines);
+        }
+
+        public static void ExportTableToCsv(SqliteConnection oConn, string vTableName, string vCsvFolderPath,
+                                            string vLogFile, string dbKey, string vCheckpointFile,
+                                            Dictionary<string, long> checkpoints)
+        {
+            string vSafeTable = vTableName.Replace("\"", "\"\"");
+            string checkpointKey = dbKey + "|" + vTableName;
+            long vLastRowId = checkpoints.ContainsKey(checkpointKey) ? checkpoints[checkpointKey] : 0;
+
+            string vQuery = $"SELECT ROWID, * FROM \"{vSafeTable}\" WHERE ROWID > {vLastRowId};";
+
+            using (var oCmd = oConn.CreateCommand())
+            {
+                oCmd.CommandText = vQuery;
+                using (var oReader = oCmd.ExecuteReader())
+                {
+                    if (!oReader.HasRows) return;
+
+                    string vCsvFileName = $"{SanitizeFileName(vTableName)}.csv";
+                    string vCsvPath = Path.Combine(vCsvFolderPath, vCsvFileName);
+                    bool fileExists = File.Exists(vCsvPath);
+
+                    using (var oWriter = new StreamWriter(vCsvPath, true, Encoding.UTF8))
+                    {
+                        int vCols = oReader.FieldCount;
+                        if (!fileExists)
+                        {
+                            for (int i = 1; i < vCols; i++)
+                            {
+                                if (i > 1) oWriter.Write(",");
+                                oWriter.Write(EscapeCsvField(oReader.GetName(i)));
+                            }
+                            oWriter.WriteLine();
+                        }
+
+                        long vMaxRowId = vLastRowId;
+                        int vRowCount = 0;
+                        while (oReader.Read())
+                        {
+                            long vRowId = oReader.GetInt64(0);
+                            vMaxRowId = Math.Max(vMaxRowId, vRowId);
+                            for (int i = 1; i < vCols; i++)
+                            {
+                                if (i > 1) oWriter.Write(",");
+                                oWriter.Write(oReader.IsDBNull(i) ? "" : EscapeCsvField(oReader.GetValue(i).ToString()));
+                            }
+                            oWriter.WriteLine();
+                            vRowCount++;
+                        }
+
+                        checkpoints[checkpointKey] = vMaxRowId;
+                        Console.WriteLine($"[{DateTime.Now}] Exported {vRowCount} new rows from '{vTableName}' to {vCsvPath}");
+
+                        if (vRowCount > 0)
+                        {
+                            string logEntry = $"{DateTime.Now}: {vRowCount} new entries came in table {vTableName}\n";
+                            File.AppendAllText(vCheckpointFile, logEntry);
+                        }
+                    }
+                }
+            }
+        }
+
+
+
+        private static string EscapeCsvField(string vValue)
+        {
+            if (vValue == null) return "";
+            bool vMustQuote = vValue.Contains(",") || vValue.Contains("\"") || vValue.Contains("\n") || vValue.Contains("\r");
+            if (vValue.Contains("\"")) vValue = vValue.Replace("\"", "\"\"");
+            return vMustQuote ? $"\"{vValue}\"" : vValue;
+        }
+
+        private static string SanitizeFileName(string vName)
+        {
+            var vInvalid = Path.GetInvalidFileNameChars();
+            var oSb = new StringBuilder();
+            foreach (var vChar in vName)
+                oSb.Append(vInvalid.Contains(vChar) ? '_' : vChar);
+            return oSb.ToString();
+        }
+    }
+}
+
+
+
+using System;
+using System.Collections.Generic;
 using System.Configuration;
 using System.IO;
-using ClosedXML.Excel;
-using EmsConsole;
+using System.Linq;
+using System.Threading;
+using Microsoft.Data.Sqlite;
 
-namespace EMSProcessor
+namespace Assembly3DCamera
 {
     class Program
     {
+        private static Dictionary<string, long> vLastExportedRowId = new Dictionary<string, long>();
+        private static Timer oTimer;
+
         static void Main(string[] args)
         {
+            string vDB_CSD = ConfigurationManager.AppSettings["DB_CSD"],
+                   vDb_Csv = ConfigurationManager.AppSettings["Db_Csv"],
+                   vLogFile = Path.Combine(vDB_CSD, "exceptions.txt"),
+                   vCheckpointFile = Path.Combine(vDB_CSD, "data.txt");
+
+            if (string.IsNullOrWhiteSpace(vDB_CSD) || string.IsNullOrWhiteSpace(vDb_Csv))
+            {
+                Console.WriteLine("Please set DB_CSD and Db_Csv in App.config.");
+                return;
+            }
+
+            Directory.CreateDirectory(vDb_Csv);
+            if (!File.Exists(vLogFile)) File.Create(vLogFile).Dispose();
+
+            vLastExportedRowId = DataHelper.LoadCheckpoints(vCheckpointFile);
+
+            oTimer = new Timer(delegate { ExportDb(vDB_CSD, vDb_Csv, vLogFile, vCheckpointFile); },
+                               null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+
+            Console.WriteLine("Export started.");
+            Console.ReadLine();
+        }
+
+        static void ExportDb(string vDB_CSD, string vDb_Csv, string vLogFile, string vCheckpointFile)
+        {
             try
             {
-                // Config values
-                string vCsvFolder = ConfigurationManager.AppSettings["EMS_CsvFolder"];
-                string vExcelFolder = ConfigurationManager.AppSettings["EMS_ExcelFolder"];
-                string vSqlConnection = ConfigurationManager.AppSettings["EMS_SqlConnection"];
+                string vDbFile = Directory.GetFiles(vDB_CSD, "*.db")
+                                          .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+                                          .FirstOrDefault();
 
-                SqlData oSqlData = new SqlData(vSqlConnection);
-
-                var vTodayDate = DateTime.Today;
-
-                if (!Directory.Exists(vCsvFolder))
+                if (vDbFile == null)
                 {
-                    Console.WriteLine($"EMS CSV folder not found: {vCsvFolder}");
+                    Console.WriteLine($"[{DateTime.Now}] No .db file found in: " + vDB_CSD);
                     return;
                 }
 
-                // Create EMS folder hierarchy: Year/Month/Date
-                string vPathYear = Path.Combine(vExcelFolder, vTodayDate.Year.ToString());
-                Directory.CreateDirectory(vPathYear);
+                string dbKey = Path.GetFileName(vDbFile);
 
-                string vPathMonth = Path.Combine(vPathYear, vTodayDate.ToString("MM"));
-                Directory.CreateDirectory(vPathMonth);
-
-                string vPathDate = Path.Combine(vPathMonth, vTodayDate.ToString("ddMMyyyy"));
-                Directory.CreateDirectory(vPathDate);
-
-                // Copy today's CSV files
-                foreach (var vCsvFile in Directory.EnumerateFiles(vCsvFolder, "*.csv"))
+                // If file replaced (new file), reset checkpoints for this dbKey
+                long fileTicks = File.GetLastWriteTimeUtc(vDbFile).Ticks;
+                string fileVerKey = "FILEVER|" + dbKey;
+                if (!vLastExportedRowId.ContainsKey(fileVerKey) || vLastExportedRowId[fileVerKey] != fileTicks)
                 {
-                    var vFileDate = File.GetLastWriteTime(vCsvFile).Date;
-                    if (vFileDate == vTodayDate)
-                    {
-                        string vCsvDestFile = Path.Combine(vPathDate, Path.GetFileName(vCsvFile));
-                        if (!File.Exists(vCsvDestFile))
-                            File.Copy(vCsvFile, vCsvDestFile);
-                    }
+                    // remove any entries for this dbKey (CSV and SQL entries)
+                    var keysToRemove = vLastExportedRowId.Keys
+                        .Where(k => k.StartsWith(dbKey + "|") || k.StartsWith("SQL|" + dbKey + "|"))
+                        .ToList();
+
+                    foreach (var k in keysToRemove)
+                        vLastExportedRowId.Remove(k);
+
+                    vLastExportedRowId[fileVerKey] = fileTicks;
+                    Console.WriteLine($"[{DateTime.Now}] Detected new/changed DB file '{dbKey}'. Resetting checkpoints for this file.");
                 }
 
-                // Convert CSV → Excel
-                foreach (var vCsvFile in Directory.EnumerateFiles(vPathDate, "*.csv"))
+                using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
                 {
-                    string vExcelFile = Path.ChangeExtension(vCsvFile, ".xlsx");
-
-                    if (!File.Exists(vExcelFile))
+                    oConn.Open();
+                    using (var oTblCmd = oConn.CreateCommand())
                     {
-                        using (var oWorkbook = new XLWorkbook())
+                        oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+                        using (var oTblReader = oTblCmd.ExecuteReader())
                         {
-                            var oWorksheet = oWorkbook.Worksheets.Add("Sheet1");
-                            int vRowIndex = 1;
+                            List<string> vTables = new List<string>();
+                            while (oTblReader.Read())
+                                vTables.Add(oTblReader.GetString(0));
 
-                            using (var oReader = new StreamReader(vCsvFile))
+                            foreach (string vTable in vTables)
                             {
-                                while (!oReader.EndOfStream)
+                                try
                                 {
-                                    var vValues = oReader.ReadLine().Split(',');
-                                    for (int vColIndex = 0; vColIndex < vValues.Length; vColIndex++)
-                                        oWorksheet.Cell(vRowIndex, vColIndex + 1).Value = vValues[vColIndex];
-                                    vRowIndex++;
+                                    DataHelper.ExportTableToCsv(oConn, vTable, vDb_Csv, vLogFile, dbKey, vCheckpointFile, vLastExportedRowId);
+                                    DatabaseHelper.ExportTableToSql(oConn, vTable, dbKey, vLogFile, vCheckpointFile, vLastExportedRowId);
+                                    // Save checkpoints after each table processed to avoid loss on crash
+                                    DataHelper.SaveCheckpoints(vCheckpointFile, vLastExportedRowId);
+                                }
+                                catch (Exception exTable)
+                                {
+                                    string vMessage = $"[{DateTime.Now}] Table '{vTable}': {exTable}\n";
+                                    File.AppendAllText(vLogFile, vMessage);
                                 }
                             }
-
-                            oWorkbook.SaveAs(vExcelFile);
-                        }
-                    }
-
-                    // Insert Excel data into SQL
-                    try
-                    {
-                        oSqlData.ProcessFile(vExcelFile);
-                    }
-                    catch (Exception oEx)
-                    {
-                        Console.WriteLine($"Error inserting SQL for {vExcelFile}: {oEx.Message}");
-                    }
-                }
-
-                Console.WriteLine("✅ EMS Processing completed successfully.");
-            }
-            catch (Exception oEx)
-            {
-                Console.WriteLine($"Unexpected error: {oEx.Message}");
-            }
-        }
-    }
-}
-
-
-
-
-
-
-
-
-using System;
-using System.Collections.Generic;
-using System.Data.SqlClient;
-using System.IO;
-using ExcelDataReader;
-
-namespace EmsConsole
-{
-    public class DataParser
-    {
-        private readonly string _connectionString;
-
-        public DataParser(string connectionString)
-        {
-            _connectionString = connectionString;
-        }
-
-        public void ParseAndInsert(string filePath)
-        {
-            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
-
-            using (var stream = File.Open(filePath, FileMode.Open, FileAccess.Read))
-            using (var reader = ExcelReaderFactory.CreateReader(stream))
-            {
-                var headerMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                string gatewayName = null;
-                string deviceName = null;
-
-                bool headerRowRead = false;
-
-                while (reader.Read())
-                {
-                    if (!headerRowRead)
-                    {
-                        for (int i = 0; i < reader.FieldCount; i++)
-                        {
-                            string colName = reader.GetValue(i)?.ToString().Trim();
-
-                            if (!string.IsNullOrEmpty(colName))
-                                headerMap[colName] = i;
-                        }
-                        headerRowRead = true;
-
-                        // Capture gateway + device name (they are in next row after headers)
-                        gatewayName = reader.GetValue(headerMap["Gateway Name"])?.ToString();
-                        deviceName = reader.GetValue(headerMap["Device Name"])?.ToString();
-
-                        continue;
-                    }
-
-                    // Skip blank rows
-                    if (reader.GetValue(0) == null) continue;
-
-                    // Get Local timestamp
-                    string localTimeStamp = reader.GetValue(headerMap["Local time stamp"])?.ToString();
-
-                    // Find energy column (OR condition)
-                    string[] possibleNames = {
-                        "TotalActiveDeliveredEnergy (Wh)",
-                        "Active energy (Wh)",
-                        "Active energy delivered (Wh)"
-                    };
-
-                    object energyVal = null;
-                    foreach (var name in possibleNames)
-                    {
-                        if (headerMap.ContainsKey(name))
-                        {
-                            energyVal = reader.GetValue(headerMap[name]);
-                            break;
-                        }
-                    }
-
-                    if (!string.IsNullOrEmpty(localTimeStamp) && energyVal != null)
-                    {
-                        InsertToDb(gatewayName, deviceName, localTimeStamp, energyVal.ToString());
-                    }
-                }
-            }
-        }
-
-        private void InsertToDb(string gatewayName, string deviceName, string localTimeStamp, string energyValue)
-        {
-            using (SqlConnection conn = new SqlConnection(_connectionString))
-            {
-                conn.Open();
-                string query = @"INSERT INTO EnergyData
-                                (GatewayName, DeviceName, LocalTimeStamp, ActiveEnergy)
-                                VALUES (@GatewayName, @DeviceName, @LocalTimeStamp, @ActiveEnergy)";
-
-                using (SqlCommand cmd = new SqlCommand(query, conn))
-                {
-                    cmd.Parameters.AddWithValue("@GatewayName", gatewayName ?? (object)DBNull.Value);
-                    cmd.Parameters.AddWithValue("@DeviceName", deviceName ?? (object)DBNull.Value);
-                    cmd.Parameters.AddWithValue("@LocalTimeStamp", localTimeStamp ?? (object)DBNull.Value);
-                    cmd.Parameters.AddWithValue("@ActiveEnergy", energyValue ?? (object)DBNull.Value);
-
-                    cmd.ExecuteNonQuery();
-                }
-            }
-        }
-    }
-}
-
-
-
-
-CREATE SCHEMA ems;
-GO
-
--- Device table
-CREATE TABLE ems.Device
-(
-    DeviceId INT IDENTITY(1,1) PRIMARY KEY,
-    GatewayName NVARCHAR(200) NOT NULL,
-    DeviceName NVARCHAR(200) NOT NULL,
-    CONSTRAINT UQ_Device UNIQUE (GatewayName, DeviceName)
-);
-GO
-
--- Energy Readings table
-CREATE TABLE ems.EnergyReadings
-(
-    ReadingId INT IDENTITY(1,1) PRIMARY KEY,
-    DeviceId INT NOT NULL,
-    LocalTimestamp DATETIME NOT NULL,
-    ActiveEnergyDelivered FLOAT NOT NULL,
-    FOREIGN KEY (DeviceId) REFERENCES ems.Device(DeviceId)
-);
-GO
-
-
-
-
-using System;
-using System.Collections.Generic;
-using System.Configuration;
-using System.Data.SqlClient;
-using System.Globalization;
-using System.IO;
-using System.Linq;
-
-namespace EmsConsole
-{
-    class CsvParser
-    {
-        public static void ParseAndInsert(string csvFile, string logFile)
-        {
-            try
-            {
-                string[] allLines = File.ReadAllLines(csvFile);
-                if (allLines.Length == 0) return;
-
-                // find header row dynamically
-                int headerRowIndex = -1;
-                string[] headers = null;
-
-                try
-                {
-                    for (int i = 0; i < allLines.Length; i++)
-                    {
-                        var cols = allLines[i].Split(',').Select(c => c.Trim()).ToArray();
-                        if (cols.Any(c => c.Equals("Gateway Name", StringComparison.OrdinalIgnoreCase)))
-                        {
-                            headers = cols;
-                            headerRowIndex = i;
-                            break;
                         }
                     }
                 }
-                catch (Exception ex)
-                {
-                    LogError(logFile, csvFile, "Error while finding header row", ex);
-                    return;
-                }
 
-                if (headers == null)
-                {
-                    LogError(logFile, csvFile, "Header row not found in file", null);
-                    return;
-                }
-
-                // column indexes
-                int gatewayIndex = Array.FindIndex(headers, h => h.Equals("Gateway Name", StringComparison.OrdinalIgnoreCase));
-                int deviceIndex = Array.FindIndex(headers, h => h.Equals("Device Name", StringComparison.OrdinalIgnoreCase));
-                int timeIndex = Array.FindIndex(headers, h => h.Equals("Local Time Stamp", StringComparison.OrdinalIgnoreCase));
-                int energyIndex = Array.FindIndex(headers, h =>
-                    h.Equals("TotalDeliveredActiveEnergy (Wh)", StringComparison.OrdinalIgnoreCase) ||
-                    h.Equals("Active energy (Wh)", StringComparison.OrdinalIgnoreCase) ||
-                    h.Equals("Active energy delivered (Wh)", StringComparison.OrdinalIgnoreCase));
-
-                if (gatewayIndex == -1 || deviceIndex == -1 || timeIndex == -1 || energyIndex == -1)
-                {
-                    LogError(logFile, csvFile, "Missing required column(s) in file", null);
-                    return;
-                }
-
-                // Gateway & Device from row immediately after headers
-                string[] firstDataRow = allLines[headerRowIndex + 1].Split(',').Select(c => c.Trim()).ToArray();
-                string gatewayName = firstDataRow[gatewayIndex];
-                string deviceName = firstDataRow[deviceIndex];
-
-                // Collect readings
-                var records = new List<(DateTime LocalTime, double Energy)>();
-
-                try
-                {
-                    for (int i = headerRowIndex + 1; i < allLines.Length; i++)
-                    {
-                        var cols = allLines[i].Split(',').Select(c => c.Trim()).ToArray();
-                        if (cols.Length <= Math.Max(timeIndex, energyIndex)) continue;
-
-                        if (DateTime.TryParse(cols[timeIndex], out DateTime localTime) &&
-                            double.TryParse(cols[energyIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out double energyValue))
-                        {
-                            records.Add((localTime, energyValue));
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogError(logFile, csvFile, "Error while parsing data rows", ex);
-                    return;
-                }
-
-                // insert into DB
-                try
-                {
-                    InsertIntoDatabase(gatewayName, deviceName, records, logFile, csvFile);
-                }
-                catch (Exception ex)
-                {
-                    LogError(logFile, csvFile, "Error while inserting into database", ex);
-                }
+                // Final save after all tables
+                DataHelper.SaveCheckpoints(vCheckpointFile, vLastExportedRowId);
+                Console.WriteLine($"[{DateTime.Now}] Check complete — all tables processed.");
             }
             catch (Exception ex)
             {
-                LogError(logFile, csvFile, "General error in ParseAndInsert", ex);
-            }
-        }
-
-        private static void InsertIntoDatabase(string gateway, string device, List<(DateTime LocalTime, double Energy)> records, string logFile, string csvFile)
-        {
-            try
-            {
-                string connectionString = ConfigurationManager.ConnectionStrings["EmsDb"].ConnectionString;
-
-                using (SqlConnection conn = new SqlConnection(connectionString))
-                {
-                    conn.Open();
-
-                    // check if device exists
-                    int deviceId;
-                    string checkSql = "SELECT DeviceId FROM ems.Device WHERE GatewayName = @GatewayName AND DeviceName = @DeviceName";
-
-                    using (SqlCommand cmd = new SqlCommand(checkSql, conn))
-                    {
-                        cmd.Parameters.AddWithValue("@GatewayName", gateway);
-                        cmd.Parameters.AddWithValue("@DeviceName", device);
-
-                        object result = cmd.ExecuteScalar();
-                        if (result != null)
-                        {
-                            deviceId = Convert.ToInt32(result);
-                        }
-                        else
-                        {
-                            // insert new device
-                            string insertDeviceSql = @"
-                                INSERT INTO ems.Device (GatewayName, DeviceName) 
-                                OUTPUT INSERTED.DeviceId 
-                                VALUES (@GatewayName, @DeviceName)";
-                            using (SqlCommand insertCmd = new SqlCommand(insertDeviceSql, conn))
-                            {
-                                insertCmd.Parameters.AddWithValue("@GatewayName", gateway);
-                                insertCmd.Parameters.AddWithValue("@DeviceName", device);
-                                deviceId = (int)insertCmd.ExecuteScalar();
-                            }
-                        }
-                    }
-
-                    // insert energy readings
-                    string insertReadingSql = @"
-                        INSERT INTO ems.EnergyReadings (DeviceId, LocalTimestamp, ActiveEnergyDelivered)
-                        VALUES (@DeviceId, @LocalTimestamp, @Energy)";
-
-                    foreach (var record in records)
-                    {
-                        using (SqlCommand cmd = new SqlCommand(insertReadingSql, conn))
-                        {
-                            cmd.Parameters.AddWithValue("@DeviceId", deviceId);
-                            cmd.Parameters.AddWithValue("@LocalTimestamp", record.LocalTime);
-                            cmd.Parameters.AddWithValue("@Energy", record.Energy);
-                            cmd.ExecuteNonQuery();
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                LogError(logFile, csvFile, "Error inside InsertIntoDatabase", ex);
-            }
-        }
-
-        private static void LogError(string logFile, string csvFile, string stage, Exception ex)
-        {
-            try
-            {
-                string message = $"{DateTime.Now:u} | File: {Path.GetFileName(csvFile)} | Stage: {stage}";
-                if (ex != null) message += $" | Error: {ex.Message}";
-                message += Environment.NewLine;
-
-                File.AppendAllText(logFile, message);
-            }
-            catch
-            {
-                // failsafe: do nothing if even logging fails
-            }
-        }
-    }
-}
-
-
-
-
-using System;
-using System.Configuration;
-using System.Data.SqlClient;
-using System.Globalization;
-using System.IO;
-
-namespace EmsConsole
-{
-    public static class CsvParser
-    {
-        public static void ParseAndInsert(string vCsvFile, string vLogFile)
-        {
-            try
-            {
-                string vConnectionString = ConfigurationManager.ConnectionStrings["EmsDb"].ConnectionString;
-
-                using (SqlConnection vConn = new SqlConnection(vConnectionString))
-                {
-                    vConn.Open();
-
-                    using (StreamReader vReader = new StreamReader(vCsvFile))
-                    {
-                        string vLine;
-                        bool vHeaderSkipped = false;
-
-                        while ((vLine = vReader.ReadLine()) != null)
-                        {
-                            if (!vHeaderSkipped)
-                            {
-                                vHeaderSkipped = true; // Skip header row
-                                continue;
-                            }
-
-                            string[] vColumns = vLine.Split(',');
-
-                            if (vColumns.Length < 3)
-                                continue; // skip invalid rows
-
-                            string vGateway = vColumns[0].Trim();
-                            string vDevice = vColumns[1].Trim();
-                            string vTimestamp = vColumns[2].Trim();
-                            string vEnergy = vColumns.Length > 3 ? vColumns[3].Trim() : null;
-
-                            DateTime vLocalTimestamp;
-                            if (!DateTime.TryParse(vTimestamp, CultureInfo.InvariantCulture, DateTimeStyles.None, out vLocalTimestamp))
-                                vLocalTimestamp = DateTime.Now;
-
-                            decimal vTotalEnergy;
-                            if (!decimal.TryParse(vEnergy, out vTotalEnergy))
-                                vTotalEnergy = 0;
-
-                            string vSql = @"
-                                INSERT INTO EmsEnergyData 
-                                (GatewayName, DeviceName, LocalTimestamp, TotalActiveDeliveredEnergy) 
-                                VALUES (@Gateway, @Device, @Timestamp, @Energy)";
-
-                            using (SqlCommand vCmd = new SqlCommand(vSql, vConn))
-                            {
-                                vCmd.Parameters.AddWithValue("@Gateway", vGateway);
-                                vCmd.Parameters.AddWithValue("@Device", vDevice);
-                                vCmd.Parameters.AddWithValue("@Timestamp", vLocalTimestamp);
-                                vCmd.Parameters.AddWithValue("@Energy", vTotalEnergy);
-
-                                vCmd.ExecuteNonQuery();
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception oEx)
-            {
-                File.AppendAllText(vLogFile, $"{DateTime.Now}: {oEx.Message}{Environment.NewLine}");
+                File.AppendAllText(vLogFile, $"[{DateTime.Now}] General DB read error: {ex}\n");
+                Console.WriteLine("Error reading DB: " + ex.Message);
             }
         }
     }
