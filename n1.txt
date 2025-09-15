@@ -1,270 +1,328 @@
 using System;
+using System.Collections.Generic;
 using System.Configuration;
 using System.IO;
-using ClosedXML.Excel;
-using EmsConsole;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using Microsoft.Data.Sqlite;
 
-namespace CsvToExcelOrganizer
+namespace Assembly3DCamera
 {
     class Program
     {
+        private static Dictionary<string, long> vLastExportedRowId = new Dictionary<string, long>();
+        private static Timer oTimer;
+
         static void Main(string[] args)
+        {
+            string vDB_CSD = ConfigurationManager.AppSettings["DB_CSD"],
+                   vDb_Csv = ConfigurationManager.AppSettings["Db_Csv"],
+                   vLogFile = Path.Combine(vDB_CSD, "exceptions.txt"),
+                   vCheckpointFile = Path.Combine(vDB_CSD, "data.txt");
+
+            if (string.IsNullOrWhiteSpace(vDB_CSD) || string.IsNullOrWhiteSpace(vDb_Csv))
+            {
+                Console.WriteLine("Please set DB_CSD and Db_Csv in App.config.");
+                return;
+            }
+
+            Directory.CreateDirectory(vDb_Csv);
+
+            if (!File.Exists(vLogFile))
+                File.Create(vLogFile).Dispose();
+
+            // Load checkpoints from data.txt
+            vLastExportedRowId = DataHelper.LoadCheckpoints(vCheckpointFile);
+
+            oTimer = new Timer(delegate { ExportDb(vDB_CSD, vDb_Csv, vLogFile, vCheckpointFile); },
+                               null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+
+            Console.WriteLine("Export started.");
+            Console.ReadLine();
+        }
+
+        static void ExportDb(string vDB_CSD, string vDb_Csv, string vLogFile, string vCheckpointFile)
         {
             try
             {
-                string vEmsCsvFiles = ConfigurationManager.AppSettings["CsvFiles"], vEmsDirectory = ConfigurationManager.AppSettings["ExcelFiles"], connectionString = ConfigurationManager.AppSettings["SqlConnectionString"];
-                SqlData sqlData = new SqlData(connectionString);
+                string vDbFile = Directory.GetFiles(vDB_CSD, "*.db")
+                    .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+                    .FirstOrDefault();
 
-                var today = DateTime.Today;
-
-                if (!Directory.Exists(vEmsCsvFiles))
+                if (vDbFile == null)
                 {
-                    Console.WriteLine($"Source folder not found: {vEmsCsvFiles}");
+                    Console.WriteLine($"[{DateTime.Now}] No .db file found in: " + vDB_CSD);
                     return;
                 }
 
-                // Create Year/Month/Date folder structure
-                string path = Path.Combine(vEmsDirectory, today.Year.ToString());
-                Directory.CreateDirectory(path);
+                string dbKey = Path.GetFileName(vDbFile);
 
-                path = Path.Combine(path, today.ToString("MM"));
-                Directory.CreateDirectory(path);
-
-                string dateFolderPath = Path.Combine(path, today.ToString("ddMMyyyy"));
-                Directory.CreateDirectory(dateFolderPath);
-
-                // Copy today's CSV files
-                foreach (var oFilePath in Directory.EnumerateFiles(vEmsCsvFiles, "*.csv"))
+                using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
                 {
-                    var fileDate = File.GetLastWriteTime(oFilePath).Date;
-                    if (fileDate == today)
-                    {
-                        string vDirectoryPath = Path.Combine(dateFolderPath, Path.GetFileName(oFilePath));
-                        if (!File.Exists(vDirectoryPath))
-                            File.Copy(oFilePath, vDirectoryPath);
-                    }
-                }
+                    oConn.Open();
 
-                // Convert CSV → Excel
-                foreach (var oCsvFile in Directory.EnumerateFiles(dateFolderPath, "*.csv"))
-                {
-                    string excelFilePath = Path.ChangeExtension(oCsvFile, ".xlsx");
-                    if (!File.Exists(excelFilePath))
+                    using (var oTblCmd = oConn.CreateCommand())
                     {
-                        using (var workbook = new XLWorkbook())
+                        oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+
+                        using (var oTblReader = oTblCmd.ExecuteReader())
                         {
-                            var worksheet = workbook.Worksheets.Add("Sheet1");
-                            int row = 1;
-                            using (var reader = new StreamReader(oCsvFile))
+                            List<string> vTables = new List<string>();
+                            while (oTblReader.Read())
+                                vTables.Add(oTblReader.GetString(0));
+
+                            foreach (string vTable in vTables)
                             {
-                                while (!reader.EndOfStream)
+                                try
                                 {
-                                    var values = reader.ReadLine().Split(',');
-                                    for (int col = 0; col < values.Length; col++)
-                                        worksheet.Cell(row, col + 1).Value = values[col];
-                                    row++;
+                                    // Export to CSV
+                                    DataHelper.ExportTableToCsv(oConn, vTable, vDb_Csv, vLogFile, dbKey, vLastExportedRowId);
+
+                                    // Export to SQL Server
+                                    DatabaseHelper.ExportTableToSql(oConn, vTable, dbKey, vLogFile, vLastExportedRowId);
+                                }
+                                catch (Exception exTable)
+                                {
+                                    string vMessage = $"[{DateTime.Now}] Table '{vTable}': {exTable}\n";
+                                    File.AppendAllText(vLogFile, vMessage);
                                 }
                             }
-                            workbook.SaveAs(excelFilePath);
                         }
-                    }
-
-                    // Insert Excel data into SQL
-                    try
-                    {
-                        sqlData.ProcessFile(excelFilePath);
-                    }
-                    catch (Exception o)
-                    {
-                        Console.WriteLine($"Error inserting SQL for {excelFilePath}: {o.Message}");
                     }
                 }
 
-                Console.WriteLine("All processing completed successfully.");
+                DataHelper.SaveCheckpoints(vCheckpointFile, vLastExportedRowId);
+
+                Console.WriteLine($"[{DateTime.Now}] Check complete — all tables processed.");
             }
-            catch (Exception o)
+            catch (Exception ex)
             {
-                Console.WriteLine($"Unexpected error: {o.Message}");
+                File.AppendAllText(vLogFile, $"[{DateTime.Now}] General DB read error: {ex}\n");
+                Console.WriteLine("Error reading DB: " + ex.Message);
             }
         }
     }
 }
--------------------------------------------
+
+
 
 using System;
-using System.Data.SqlClient;
-using ClosedXML.Excel;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using Microsoft.Data.Sqlite;
 
-namespace EmsConsole
+namespace Assembly3DCamera
 {
-    public class SqlData
+    public static class DataHelper
     {
-        private readonly string _connectionString;
-
-        public SqlData(string connectionString)
+        public static Dictionary<string, long> LoadCheckpoints(string checkpointFile)
         {
-            _connectionString = connectionString;
+            var dict = new Dictionary<string, long>();
+            if (!File.Exists(checkpointFile)) return dict;
+
+            foreach (var line in File.ReadAllLines(checkpointFile))
+            {
+                var parts = line.Split('|');
+                if (parts.Length == 2 && long.TryParse(parts[1], out long id))
+                {
+                    dict[parts[0]] = id;
+                }
+            }
+            return dict;
         }
 
-        public void ProcessFile(string excelFilePath)
+        public static void SaveCheckpoints(string checkpointFile, Dictionary<string, long> checkpoints)
         {
-            using (var workbook = new XLWorkbook(excelFilePath))
+            var lines = checkpoints.Select(kv => kv.Key + "|" + kv.Value);
+            File.WriteAllLines(checkpointFile, lines);
+        }
+
+        public static void ExportTableToCsv(SqliteConnection oConn, string vTableName, string vCsvFolderPath,
+                                            string vLogFile, string dbKey, Dictionary<string, long> checkpoints)
+        {
+            string vSafeTable = vTableName.Replace("\"", "\"\"");
+
+            string checkpointKey = dbKey + "|" + vTableName;
+            long vLastRowId = checkpoints.ContainsKey(checkpointKey) ? checkpoints[checkpointKey] : 0;
+
+            string vQuery = vLastRowId == 0
+                ? $"SELECT ROWID, * FROM \"{vSafeTable}\";"
+                : $"SELECT ROWID, * FROM \"{vSafeTable}\" WHERE ROWID > {vLastRowId};";
+
+            using (var oCmd = oConn.CreateCommand())
             {
-                var worksheet = workbook.Worksheet(1);
-
-                // --- Find GatewayName & DeviceName ---
-                string gatewayName = FindSingleValue(worksheet, "Gateway Name");
-                string deviceName = FindSingleValue(worksheet, "Device Name");
-
-                if (string.IsNullOrWhiteSpace(gatewayName) || string.IsNullOrWhiteSpace(deviceName))
+                oCmd.CommandText = vQuery;
+                using (var oReader = oCmd.ExecuteReader())
                 {
-                    Console.WriteLine($"Skipping {excelFilePath}, missing Gateway/Device");
-                    return;
-                }
+                    if (!oReader.HasRows) return;
 
-                int deviceId = InsertDevice(gatewayName, deviceName);
+                    // Generate new filename with timestamp
+                    string timestamp = DateTime.Now.ToString("ddMMyy_HHmmss");
+                    string vCsvFileName = $"{SanitizeFileName(vTableName)}_{timestamp}.csv";
+                    string vCsvPath = Path.Combine(vCsvFolderPath, vCsvFileName);
 
-                // --- Find multiple value columns ---
-                int tsCol = FindColumn(worksheet, "Local Time Stamp");
-                int energyCol = FindColumn(worksheet, "TotalDeliveredActiveEnergy (Wh)", "TotalActiveDeliveredEnergy (Wh)", "Active energy delivered (Wh)");
-                int errorCol = FindColumn(worksheet, "Error");
-
-                if (tsCol == -1 || energyCol == -1 || errorCol == -1)
-                {
-                    Console.WriteLine($"Skipping {excelFilePath}, missing required data columns.");
-                    return;
-                }
-
-                int startRow = FindHeaderRow(worksheet, "Local Time Stamp"); // header row index
-                int row = startRow + 1;
-
-                using (var conn = new SqlConnection(_connectionString))
-                {
-                    conn.Open();
-
-                    while (!worksheet.Cell(row, tsCol).IsEmpty())
+                    using (var oWriter = new StreamWriter(vCsvPath, false, Encoding.UTF8))
                     {
-                        string timestamp = worksheet.Cell(row, tsCol).GetValue<string>();
-                        string energy = worksheet.Cell(row, energyCol).GetValue<string>();
-                        string error = worksheet.Cell(row, errorCol).GetValue<string>();
+                        int vCols = oReader.FieldCount;
 
-                        InsertEnergyReading(conn, deviceId, timestamp, energy, error);
-                        row++;
+                        // Write headers
+                        for (int i = 1; i < vCols; i++)
+                        {
+                            if (i > 1) oWriter.Write(",");
+                            oWriter.Write(EscapeCsvField(oReader.GetName(i)));
+                        }
+                        oWriter.WriteLine();
+
+                        long vMaxRowId = vLastRowId;
+                        int vRowCount = 0;
+
+                        while (oReader.Read())
+                        {
+                            long vRowId = oReader.GetInt64(0);
+                            vMaxRowId = Math.Max(vMaxRowId, vRowId);
+
+                            for (int i = 1; i < vCols; i++)
+                            {
+                                if (i > 1) oWriter.Write(",");
+                                if (oReader.IsDBNull(i))
+                                    oWriter.Write("");
+                                else
+                                    oWriter.Write(EscapeCsvField(oReader.GetValue(i).ToString()));
+                            }
+                            oWriter.WriteLine();
+                            vRowCount++;
+                        }
+
+                        checkpoints[checkpointKey] = vMaxRowId;
+                        Console.WriteLine($"[{DateTime.Now}] Exported {vRowCount} new rows from '{vTableName}' → {vCsvPath}");
                     }
                 }
             }
         }
 
-        // Find a single-value header (e.g., Gateway Name, Device Name) and return value below it
-        private string FindSingleValue(IXLWorksheet ws, string header)
+        private static string EscapeCsvField(string vValue)
         {
-            foreach (var cell in ws.CellsUsed())
+            if (vValue == null) return "";
+            bool vMustQuote = vValue.Contains(",") || vValue.Contains("\"") || vValue.Contains("\n") || vValue.Contains("\r");
+            if (vValue.Contains("\"")) vValue = vValue.Replace("\"", "\"\"");
+            return vMustQuote ? $"\"{vValue}\"" : vValue;
+        }
+
+        private static string SanitizeFileName(string vName)
+        {
+            var vInvalid = Path.GetInvalidFileNameChars();
+            var oSb = new StringBuilder();
+            foreach (var vChar in vName)
             {
-                if (cell.GetValue<string>().Trim().Equals(header, StringComparison.OrdinalIgnoreCase))
+                oSb.Append(vInvalid.Contains(vChar) ? '_' : vChar);
+            }
+            return oSb.ToString();
+        }
+    }
+}
+
+
+
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data.SqlClient;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    public static class DatabaseHelper
+    {
+        public static void ExportTableToSql(SqliteConnection oConn, string vTableName, string dbKey,
+                                            string vLogFile, Dictionary<string, long> checkpoints)
+        {
+            string checkpointKey = "SQL|" + dbKey + "|" + vTableName;
+            long vLastRowId = checkpoints.ContainsKey(checkpointKey) ? checkpoints[checkpointKey] : 0;
+
+            string vQuery = vLastRowId == 0
+                ? $"SELECT ROWID, * FROM \"{vTableName}\";"
+                : $"SELECT ROWID, * FROM \"{vTableName}\" WHERE ROWID > {vLastRowId};";
+
+            using (var oCmd = oConn.CreateCommand())
+            {
+                oCmd.CommandText = vQuery;
+                using (var oReader = oCmd.ExecuteReader())
                 {
-                    return cell.Worksheet.Cell(cell.Address.RowNumber + 1, cell.Address.ColumnNumber).GetValue<string>().Trim();
+                    if (!oReader.HasRows) return;
+
+                    string timestamp = DateTime.Now.ToString("ddMMyy_HHmmss");
+                    string sqlTableName = $"{vTableName}_{timestamp}";
+
+                    string connStr = ConfigurationManager.AppSettings["SqlServerConn"];
+                    using (var sqlConn = new SqlConnection(connStr))
+                    {
+                        sqlConn.Open();
+
+                        // Create table if not exists
+                        CreateSqlTable(sqlConn, oReader, sqlTableName);
+
+                        long vMaxRowId = vLastRowId;
+                        int vRowCount = 0;
+
+                        while (oReader.Read())
+                        {
+                            long vRowId = oReader.GetInt64(0);
+                            vMaxRowId = Math.Max(vMaxRowId, vRowId);
+
+                            InsertRow(sqlConn, sqlTableName, oReader);
+                            vRowCount++;
+                        }
+
+                        checkpoints[checkpointKey] = vMaxRowId;
+                        Console.WriteLine($"[{DateTime.Now}] Exported {vRowCount} rows → SQL Server table {sqlTableName}");
+                    }
                 }
             }
-            return null;
         }
 
-        // Find the row index of a header
-        private int FindHeaderRow(IXLWorksheet ws, string header)
+        private static void CreateSqlTable(SqlConnection sqlConn, SqliteDataReader reader, string sqlTableName)
         {
-            foreach (var cell in ws.CellsUsed())
+            using (var cmd = sqlConn.CreateCommand())
             {
-                if (cell.GetValue<string>().Trim().Equals(header, StringComparison.OrdinalIgnoreCase))
-                    return cell.Address.RowNumber;
-            }
-            return -1;
-        }
-
-        // Find column index of a header
-        // Updated FindColumn method that supports multiple possible headers
-        private int FindColumn(IXLWorksheet ws, params string[] headers)
-        {
-            foreach (var cell in ws.CellsUsed())
-            {
-                string cellValue = cell.GetValue<string>().Trim();
-                foreach (var header in headers)
+                List<string> cols = new List<string>();
+                for (int i = 1; i < reader.FieldCount; i++)
                 {
-                    if (cellValue.Equals(header, StringComparison.OrdinalIgnoreCase))
-                        return cell.Address.ColumnNumber;
+                    string colName = reader.GetName(i);
+                    cols.Add($"[{colName}] NVARCHAR(MAX)");
                 }
-            }
-            return -1;
-        }
 
-
-        // Insert device if not exists, return DeviceId
-        private int InsertDevice(string gateway, string device)
-        {
-            using (var conn = new SqlConnection(_connectionString))
-            {
-                conn.Open();
-
-                string sql = @"
-                    IF NOT EXISTS (SELECT 1 FROM ems.Device WHERE GatewayName=@g AND DeviceName=@d)
-                    BEGIN
-                        INSERT INTO ems.Device(GatewayName, DeviceName) VALUES(@g,@d);
-                    END
-                    SELECT DeviceId FROM ems.Device WHERE GatewayName=@g AND DeviceName=@d;";
-
-                using (var cmd = new SqlCommand(sql, conn))
-                {
-                    cmd.Parameters.AddWithValue("@g", gateway);
-                    cmd.Parameters.AddWithValue("@d", device);
-                    return (int)cmd.ExecuteScalar();
-                }
+                cmd.CommandText = $"IF OBJECT_ID('{sqlTableName}', 'U') IS NULL " +
+                                  $"CREATE TABLE [{sqlTableName}] ({string.Join(",", cols)});";
+                cmd.ExecuteNonQuery();
             }
         }
 
-        // Insert readings into EnergyReadings
-        private void InsertEnergyReading(SqlConnection conn, int deviceId, string ts, string energy, string error)
+        private static void InsertRow(SqlConnection sqlConn, string sqlTableName, SqliteDataReader reader)
         {
-            string sql = @"INSERT INTO ems.EnergyReadings (DeviceId, LocalTimestamp, ActiveEnergyDelivered, Error) 
-                           VALUES (@id,@ts,@energy,@err)";
+            List<string> colNames = new List<string>();
+            List<string> colParams = new List<string>();
+            var values = new List<SqlParameter>();
 
-            using (var cmd = new SqlCommand(sql, conn))
+            for (int i = 1; i < reader.FieldCount; i++)
             {
-                cmd.Parameters.AddWithValue("@id", deviceId);
-                cmd.Parameters.AddWithValue("@ts", ts ?? "");
-                cmd.Parameters.AddWithValue("@energy", energy ?? "");
-                cmd.Parameters.AddWithValue("@err", error ?? "");
+                string colName = reader.GetName(i);
+                colNames.Add($"[{colName}]");
+                colParams.Add($"@p{i}");
+
+                object val = reader.IsDBNull(i) ? DBNull.Value : reader.GetValue(i);
+                values.Add(new SqlParameter($"@p{i}", val));
+            }
+
+            string sql = $"INSERT INTO [{sqlTableName}] ({string.Join(",", colNames)}) VALUES ({string.Join(",", colParams)});";
+
+            using (var cmd = new SqlCommand(sql, sqlConn))
+            {
+                cmd.Parameters.AddRange(values.ToArray());
                 cmd.ExecuteNonQuery();
             }
         }
     }
 }
----------------------------------------------
-
-<?xml version="1.0" encoding="utf-8"?>
-<configuration>
-	<appSettings>
-		<add key="CsvFiles" value="C:\Users\91862\Desktop\EMS\EmsConsoleApp\EmsCsvFiles" />
-		<add key="ExcelFiles" value="C:\Users\91862\Desktop\EMS\EmsConsoleApp\EmsDirectory" />
-		<add key="SqlConnectionString" value="Server=.\SQLEXPRESS;Database=EmsDb;User Id=sa;Password=harry@1234;" />
-	</appSettings>
-	<runtime>
-		<assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">
-			<dependentAssembly>
-				<assemblyIdentity name="System.Runtime.CompilerServices.Unsafe" publicKeyToken="b03f5f7f11d50a3a" culture="neutral" />
-				<bindingRedirect oldVersion="0.0.0.0-4.0.6.0" newVersion="4.0.6.0" />
-			</dependentAssembly>
-			<dependentAssembly>
-				<assemblyIdentity name="System.Memory" publicKeyToken="cc7b13ffcd2ddd51" culture="neutral" />
-				<bindingRedirect oldVersion="0.0.0.0-4.0.1.2" newVersion="4.0.1.2" />
-			</dependentAssembly>
-			<dependentAssembly>
-				<assemblyIdentity name="System.Numerics.Vectors" publicKeyToken="b03f5f7f11d50a3a" culture="neutral" />
-				<bindingRedirect oldVersion="0.0.0.0-4.1.4.0" newVersion="4.1.4.0" />
-			</dependentAssembly>
-			<dependentAssembly>
-				<assemblyIdentity name="System.Buffers" publicKeyToken="cc7b13ffcd2ddd51" culture="neutral" />
-				<bindingRedirect oldVersion="0.0.0.0-4.0.3.0" newVersion="4.0.3.0" />
-			</dependentAssembly>
-		</assemblyBinding>
-	</runtime>
-</configuration>
-
---------------------------------------------
