@@ -1,361 +1,398 @@
-
 <?xml version="1.0" encoding="utf-8" ?>
 <configuration>
   <appSettings>
-    <add key="DbFolder" value="C:\Path\To\DbFolder" />
-    <add key="OutputFolder" value="C:\Path\To\OutputFolder" />
-  </appSettings>
+    <!-- Folder where .db files are stored -->
+    <add key="DbFolder" value="C:\Users\91862\Desktop\DbFiles" />
 
-  <connectionStrings>
-    <add name="SqlServerConn" connectionString="Server=YOUR_SERVER;Database=YOUR_DB;Trusted_Connection=True;" providerName="System.Data.SqlClient"/>
-  </connectionStrings>
+    <!-- Folder where CSV files will be saved -->
+    <add key="CsvFolder" value="C:\Users\91862\Desktop\CsvFiles" />
+
+    <!-- Log files (data.txt and exceptions.txt) -->
+    <add key="LogFolder" value="C:\Users\91862\Desktop\Logs" />
+
+    <!-- SQL Server connection -->
+    <add key="SqlConnectionString" 
+         value="Server=localhost;Database=InspectData;User Id=sa;Password=Epciz$600;" />
+  </appSettings>
 </configuration>
 
 
--------
+
+
+----
+
 
 using System;
+using System.Configuration;
+using System.IO;
 using System.Threading;
 
 namespace Assembly3DCamera
 {
     class Program
     {
+        private static Timer oTimer;
+
         static void Main(string[] args)
         {
-            try
+            string vDB_CSD = ConfigurationManager.AppSettings["DB_CSD"],
+                   vDb_Csv = ConfigurationManager.AppSettings["Db_Csv"],
+                   vLogFile = Path.Combine(vDB_CSD, "exceptions.txt"),
+                   vDataFile = Path.Combine(vDB_CSD, "data.txt");
+
+            if (string.IsNullOrWhiteSpace(vDB_CSD) || string.IsNullOrWhiteSpace(vDb_Csv))
             {
-                Console.WriteLine("Starting DB to CSV & SQL Server Sync...");
-
-                while (true)
-                {
-                    try
-                    {
-                        // Export data from .db to CSV
-                        Data.ExportDataToCsv();
-
-                        // Export data from .db to SQL Server
-                        Database.ExportDataToSqlServer();
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.LogException(ex);
-                    }
-
-                    Console.WriteLine("Waiting 5 minutes before next check...");
-                    Thread.Sleep(TimeSpan.FromMinutes(5));
-                }
+                Console.WriteLine("Please set DB_CSD and Db_Csv in App.config.");
+                return;
             }
-            catch (Exception ex)
+
+            Directory.CreateDirectory(vDb_Csv);
+
+            Logger.Init(vLogFile);
+            DataTracker.Init(vDataFile);
+
+            // Run every 5 minutes
+            oTimer = new Timer(delegate
             {
-                Logger.LogException(ex);
-            }
+                DataProcessor.ExportAllDbs(vDB_CSD, vDb_Csv);
+                DatabaseProcessor.ExportAllDbsToSql(vDB_CSD);
+            }, null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+
+            Console.WriteLine("Export started. Press Enter to stop.");
+            Console.ReadLine();
         }
     }
 }
 
 
-----------
-
+-------
 
 using System;
 using System.Collections.Generic;
-using System.Configuration;
 using System.Data;
 using System.IO;
+using System.Linq;
+using System.Text;
 using Microsoft.Data.Sqlite;
 
 namespace Assembly3DCamera
 {
-    public static class Data
+    public static class DataProcessor
     {
-        private static readonly string DbFolder = ConfigurationManager.AppSettings["DbFolder"];
-        private static readonly string OutputFolder = ConfigurationManager.AppSettings["OutputFolder"];
-        private static readonly string DataLogFile = Path.Combine(OutputFolder, "data.txt");
-
-        public static void ExportDataToCsv()
+        public static void ExportAllDbs(string vDB_CSD, string vDb_Csv)
         {
-            foreach (string dbFile in Directory.GetFiles(DbFolder, "*.db"))
+            try
             {
-                try
+                var dbFiles = Directory.GetFiles(vDB_CSD, "*.db");
+                if (dbFiles.Length == 0)
                 {
-                    using (var connection = new SqliteConnection($"Data Source={dbFile}"))
+                    Console.WriteLine($"[{DateTime.Now}] No .db files found in {vDB_CSD}");
+                    return;
+                }
+
+                foreach (var vDbFile in dbFiles)
+                {
+                    ExportDbToCsv(vDbFile, vDb_Csv);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"General DB read error: {ex}");
+            }
+        }
+
+        private static void ExportDbToCsv(string vDbFile, string vDb_Csv)
+        {
+            try
+            {
+                using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
+                {
+                    oConn.Open();
+                    using (var oTblCmd = oConn.CreateCommand())
                     {
-                        connection.Open();
-
-                        DataTable tables = connection.GetSchema("Tables");
-
-                        foreach (DataRow row in tables.Rows)
+                        oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+                        using (var oTblReader = oTblCmd.ExecuteReader())
                         {
-                            string tableName = row["TABLE_NAME"].ToString();
-                            string csvFilePath = Path.Combine(OutputFolder, $"{tableName}.csv");
+                            List<string> vTables = new List<string>();
+                            while (oTblReader.Read())
+                                vTables.Add(oTblReader.GetString(0));
 
-                            // Ensure data.txt exists
-                            if (!File.Exists(DataLogFile)) File.WriteAllText(DataLogFile, "");
-
-                            var lastProcessedIds = LoadProcessedIds();
-
-                            using (var cmd = connection.CreateCommand())
+                            foreach (string vTable in vTables)
                             {
-                                cmd.CommandText = $"SELECT * FROM {tableName}";
-                                using (var reader = cmd.ExecuteReader())
+                                try
                                 {
-                                    var newRows = new List<string>();
-                                    var headerWritten = File.Exists(csvFilePath);
-
-                                    using (var sw = new StreamWriter(csvFilePath, true))
-                                    {
-                                        if (!headerWritten)
-                                        {
-                                            // Write header
-                                            var header = new List<string>();
-                                            for (int i = 0; i < reader.FieldCount; i++)
-                                                header.Add(reader.GetName(i));
-                                            sw.WriteLine(string.Join(",", header));
-                                        }
-
-                                        while (reader.Read())
-                                        {
-                                            string rowData = "";
-                                            for (int i = 0; i < reader.FieldCount; i++)
-                                            {
-                                                rowData += reader[i]?.ToString().Replace(",", ";") + ",";
-                                            }
-                                            rowData = rowData.TrimEnd(',');
-
-                                            string uniqueKey = $"{tableName}:{rowData.GetHashCode()}";
-
-                                            if (!lastProcessedIds.Contains(uniqueKey))
-                                            {
-                                                sw.WriteLine(rowData);
-                                                newRows.Add(uniqueKey);
-                                            }
-                                        }
-                                    }
-
-                                    if (newRows.Count > 0)
-                                    {
-                                        AppendProcessedIds(newRows);
-                                        Logger.LogInfo($"{newRows.Count} new rows appended in {tableName}.csv");
-                                    }
+                                    ExportTableToCsv(oConn, vTable, vDb_Csv, vDbFile);
+                                }
+                                catch (Exception exTable)
+                                {
+                                    Logger.Log($"Table '{vTable}' in {vDbFile}: {exTable}");
                                 }
                             }
                         }
                     }
                 }
-                catch (Exception ex)
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"Error reading DB {vDbFile}: {ex}");
+            }
+        }
+
+        private static void ExportTableToCsv(SqliteConnection oConn, string vTableName, string vCsvFolderPath, string vDbFile)
+        {
+            string vSafeTable = vTableName.Replace("\"", "\"\"");
+            string vCsvFileName = SanitizeFileName(vTableName) + ".csv";
+            string vCsvPath = Path.Combine(vCsvFolderPath, vCsvFileName);
+
+            string vQuery = $"SELECT ROWID, * FROM \"{vSafeTable}\";";
+
+            using (var oCmd = oConn.CreateCommand())
+            {
+                oCmd.CommandText = vQuery;
+                using (var oReader = oCmd.ExecuteReader())
                 {
-                    Logger.LogException(ex);
+                    if (!oReader.HasRows) return;
+
+                    bool vFileExists = File.Exists(vCsvPath);
+
+                    using (var oWriter = new StreamWriter(vCsvPath, true, Encoding.UTF8))
+                    {
+                        int vCols = oReader.FieldCount;
+
+                        // write headers if file new
+                        if (!vFileExists)
+                        {
+                            for (int i = 1; i < vCols; i++)
+                            {
+                                if (i > 1) oWriter.Write(",");
+                                oWriter.Write(EscapeCsvField(oReader.GetName(i)));
+                            }
+                            oWriter.WriteLine();
+                        }
+
+                        int vRowCount = 0;
+
+                        while (oReader.Read())
+                        {
+                            long vRowId = oReader.GetInt64(0);
+                            string uniqueKey = $"{Path.GetFileName(vDbFile)}|{vTableName}|{vRowId}";
+
+                            if (DataTracker.IsProcessed(uniqueKey)) continue;
+
+                            for (int i = 1; i < vCols; i++)
+                            {
+                                if (i > 1) oWriter.Write(",");
+                                if (oReader.IsDBNull(i))
+                                    oWriter.Write("");
+                                else
+                                    oWriter.Write(EscapeCsvField(oReader.GetValue(i).ToString()));
+                            }
+                            oWriter.WriteLine();
+
+                            DataTracker.MarkProcessed(uniqueKey);
+                            vRowCount++;
+                        }
+
+                        if (vRowCount > 0)
+                            Console.WriteLine($"[{DateTime.Now}] Exported {vRowCount} new rows from '{vTableName}' ({Path.GetFileName(vDbFile)}) → {vCsvPath}");
+                    }
                 }
             }
         }
 
-        private static HashSet<string> LoadProcessedIds()
+        private static string EscapeCsvField(string vValue)
         {
-            var ids = new HashSet<string>();
-            if (File.Exists(DataLogFile))
-            {
-                foreach (var line in File.ReadAllLines(DataLogFile))
-                {
-                    ids.Add(line.Trim());
-                }
-            }
-            return ids;
+            if (vValue == null) return "";
+            bool vMustQuote = vValue.Contains(",") || vValue.Contains("\"") || vValue.Contains("\n") || vValue.Contains("\r");
+            if (vValue.Contains("\"")) vValue = vValue.Replace("\"", "\"\"");
+            return vMustQuote ? $"\"{vValue}\"" : vValue;
         }
 
-        private static void AppendProcessedIds(IEnumerable<string> newIds)
+        private static string SanitizeFileName(string vName)
         {
-            using (var sw = new StreamWriter(DataLogFile, true))
+            var vInvalid = Path.GetInvalidFileNameChars();
+            var oSb = new StringBuilder();
+            foreach (var vChar in vName)
             {
-                foreach (var id in newIds)
-                {
-                    sw.WriteLine(id);
-                }
+                oSb.Append(vInvalid.Contains(vChar) ? '_' : vChar);
             }
+            return oSb.ToString();
+        }
+    }
+
+    public static class DataTracker
+    {
+        private static HashSet<string> processed = new HashSet<string>();
+        private static string filePath;
+
+        public static void Init(string path)
+        {
+            filePath = path;
+            if (File.Exists(filePath))
+                processed = new HashSet<string>(File.ReadAllLines(filePath));
+        }
+
+        public static bool IsProcessed(string key) => processed.Contains(key);
+
+        public static void MarkProcessed(string key)
+        {
+            if (processed.Add(key))
+                File.AppendAllLines(filePath, new[] { key });
+        }
+    }
+
+    public static class Logger
+    {
+        private static string logFile;
+
+        public static void Init(string path)
+        {
+            logFile = path;
+            if (!File.Exists(logFile))
+                File.WriteAllText(logFile, "=== Exception Log ===\n");
+        }
+
+        public static void Log(string msg)
+        {
+            string entry = $"[{DateTime.Now}] {msg}\n";
+            File.AppendAllText(logFile, entry);
+            Console.WriteLine(entry);
         }
     }
 }
 
-
-------------
-
+--------
 
 using System;
 using System.Collections.Generic;
 using System.Configuration;
-using System.Data;
 using System.Data.SqlClient;
 using System.IO;
 using Microsoft.Data.Sqlite;
 
 namespace Assembly3DCamera
 {
-    public static class Database
+    public static class DatabaseProcessor
     {
-        private static readonly string DbFolder = ConfigurationManager.AppSettings["DbFolder"];
-        private static readonly string SqlConnectionString = ConfigurationManager.ConnectionStrings["SqlServerConn"].ConnectionString;
-        private static readonly string DataLogFile = Path.Combine(ConfigurationManager.AppSettings["OutputFolder"], "data.txt");
+        private static readonly string SqlConnStr = ConfigurationManager.AppSettings["SqlServerConnStr"];
 
-        public static void ExportDataToSqlServer()
+        public static void ExportAllDbsToSql(string vDB_CSD)
         {
-            foreach (string dbFile in Directory.GetFiles(DbFolder, "*.db"))
+            try
             {
-                try
+                var dbFiles = Directory.GetFiles(vDB_CSD, "*.db");
+                foreach (var vDbFile in dbFiles)
                 {
-                    using (var sqliteConn = new SqliteConnection($"Data Source={dbFile}"))
+                    ExportDbToSql(vDbFile);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"General DB-to-SQL error: {ex}");
+            }
+        }
+
+        private static void ExportDbToSql(string vDbFile)
+        {
+            using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
+            {
+                oConn.Open();
+                using (var oTblCmd = oConn.CreateCommand())
+                {
+                    oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+                    using (var oTblReader = oTblCmd.ExecuteReader())
                     {
-                        sqliteConn.Open();
-                        DataTable tables = sqliteConn.GetSchema("Tables");
+                        List<string> vTables = new List<string>();
+                        while (oTblReader.Read())
+                            vTables.Add(oTblReader.GetString(0));
 
-                        foreach (DataRow row in tables.Rows)
+                        foreach (string vTable in vTables)
                         {
-                            string tableName = row["TABLE_NAME"].ToString();
-
-                            var lastProcessedIds = LoadProcessedIds();
-
-                            using (var sqliteCmd = sqliteConn.CreateCommand())
+                            try
                             {
-                                sqliteCmd.CommandText = $"SELECT * FROM {tableName}";
-                                using (var reader = sqliteCmd.ExecuteReader())
-                                {
-                                    using (var sqlConn = new SqlConnection(SqlConnectionString))
-                                    {
-                                        sqlConn.Open();
-
-                                        // Create table if not exists
-                                        CreateTableIfNotExists(sqlConn, reader, tableName);
-
-                                        var newRows = new List<string>();
-
-                                        while (reader.Read())
-                                        {
-                                            string rowData = "";
-                                            for (int i = 0; i < reader.FieldCount; i++)
-                                                rowData += reader[i]?.ToString().Replace(",", ";") + ",";
-                                            rowData = rowData.TrimEnd(',');
-
-                                            string uniqueKey = $"{tableName}:{rowData.GetHashCode()}";
-
-                                            if (!lastProcessedIds.Contains(uniqueKey))
-                                            {
-                                                InsertRow(sqlConn, reader, tableName);
-                                                newRows.Add(uniqueKey);
-                                            }
-                                        }
-
-                                        if (newRows.Count > 0)
-                                        {
-                                            AppendProcessedIds(newRows);
-                                            Logger.LogInfo($"{newRows.Count} new rows inserted in {tableName} (SQL Server).");
-                                        }
-                                    }
-                                }
+                                ExportTableToSql(oConn, vTable, vDbFile);
+                            }
+                            catch (Exception exTable)
+                            {
+                                Logger.Log($"SQL Insert error in '{vTable}' from {vDbFile}: {exTable}");
                             }
                         }
                     }
                 }
-                catch (Exception ex)
+            }
+        }
+
+        private static void ExportTableToSql(SqliteConnection oConn, string vTableName, string vDbFile)
+        {
+            string vSafeTable = vTableName.Replace("\"", "\"\"");
+            string vQuery = $"SELECT ROWID, * FROM \"{vSafeTable}\";";
+
+            using (var oCmd = oConn.CreateCommand())
+            {
+                oCmd.CommandText = vQuery;
+                using (var oReader = oCmd.ExecuteReader())
                 {
-                    Logger.LogException(ex);
+                    if (!oReader.HasRows) return;
+
+                    using (SqlConnection sqlConn = new SqlConnection(SqlConnStr))
+                    {
+                        sqlConn.Open();
+
+                        // ensure table exists
+                        EnsureSqlTable(sqlConn, vTableName, oReader);
+
+                        int vRowCount = 0;
+
+                        while (oReader.Read())
+                        {
+                            long vRowId = oReader.GetInt64(0);
+                            string uniqueKey = $"{Path.GetFileName(vDbFile)}|{vTableName}|{vRowId}";
+
+                            if (DataTracker.IsProcessed(uniqueKey)) continue;
+
+                            List<string> values = new List<string>();
+                            for (int i = 1; i < oReader.FieldCount; i++)
+                            {
+                                if (oReader.IsDBNull(i)) values.Add("NULL");
+                                else values.Add("'" + oReader.GetValue(i).ToString().Replace("'", "''") + "'");
+                            }
+
+                            string sql = $"INSERT INTO [{vTableName}] VALUES ({string.Join(",", values)});";
+                            using (SqlCommand cmd = new SqlCommand(sql, sqlConn))
+                            {
+                                cmd.ExecuteNonQuery();
+                            }
+
+                            DataTracker.MarkProcessed(uniqueKey);
+                            vRowCount++;
+                        }
+
+                        if (vRowCount > 0)
+                            Console.WriteLine($"[{DateTime.Now}] Inserted {vRowCount} new rows into SQL table '{vTableName}' from {Path.GetFileName(vDbFile)}");
+                    }
                 }
             }
         }
 
-        private static void CreateTableIfNotExists(SqlConnection conn, IDataReader reader, string tableName)
+        private static void EnsureSqlTable(SqlConnection sqlConn, string vTableName, SqliteDataReader reader)
         {
-            var columnDefs = new List<string>();
-            for (int i = 0; i < reader.FieldCount; i++)
-            {
-                columnDefs.Add($"[{reader.GetName(i)}] NVARCHAR(MAX)");
-            }
+            string checkTableSql = $"IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='{vTableName}' AND xtype='U') " +
+                                   $"CREATE TABLE [{vTableName}] ({BuildSqlColumns(reader)});";
 
-            string createTableSql = $@"
-                IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='{tableName}' AND xtype='U')
-                CREATE TABLE [{tableName}] ({string.Join(",", columnDefs)})";
-
-            using (var cmd = new SqlCommand(createTableSql, conn))
+            using (SqlCommand cmd = new SqlCommand(checkTableSql, sqlConn))
             {
                 cmd.ExecuteNonQuery();
             }
         }
 
-        private static void InsertRow(SqlConnection conn, IDataReader reader, string tableName)
+        private static string BuildSqlColumns(SqliteDataReader reader)
         {
-            var columns = new List<string>();
-            var values = new List<string>();
-
-            for (int i = 0; i < reader.FieldCount; i++)
+            List<string> cols = new List<string>();
+            for (int i = 1; i < reader.FieldCount; i++)
             {
-                columns.Add($"[{reader.GetName(i)}]");
-                values.Add($"@p{i}");
+                cols.Add($"[{reader.GetName(i)}] NVARCHAR(MAX)");
             }
-
-            string insertSql = $"INSERT INTO [{tableName}] ({string.Join(",", columns)}) VALUES ({string.Join(",", values)})";
-
-            using (var cmd = new SqlCommand(insertSql, conn))
-            {
-                for (int i = 0; i < reader.FieldCount; i++)
-                {
-                    cmd.Parameters.AddWithValue($"@p{i}", reader[i] ?? DBNull.Value);
-                }
-                cmd.ExecuteNonQuery();
-            }
-        }
-
-        private static HashSet<string> LoadProcessedIds()
-        {
-            var ids = new HashSet<string>();
-            if (File.Exists(DataLogFile))
-            {
-                foreach (var line in File.ReadAllLines(DataLogFile))
-                {
-                    ids.Add(line.Trim());
-                }
-            }
-            return ids;
-        }
-
-        private static void AppendProcessedIds(IEnumerable<string> newIds)
-        {
-            using (var sw = new StreamWriter(DataLogFile, true))
-            {
-                foreach (var id in newIds)
-                {
-                    sw.WriteLine(id);
-                }
-            }
-        }
-    }
-}
-
-
-
---------------
-
-
-using System;
-using System.IO;
-
-namespace Assembly3DCamera
-{
-    public static class Logger
-    {
-        private static readonly string LogFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "exceptions.txt");
-
-        public static void LogException(Exception ex)
-        {
-            using (var sw = new StreamWriter(LogFile, true))
-            {
-                sw.WriteLine($"[{DateTime.Now}] ERROR: {ex}");
-            }
-        }
-
-        public static void LogInfo(string message)
-        {
-            using (var sw = new StreamWriter(LogFile, true))
-            {
-                sw.WriteLine($"[{DateTime.Now}] INFO: {message}");
-            }
+            return string.Join(",", cols);
         }
     }
 }
