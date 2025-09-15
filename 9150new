@@ -1,0 +1,308 @@
+using System;
+using System.Threading;
+
+namespace Assembly3DCamera
+{
+    class Program
+    {
+        static void Main()
+        {
+            Console.WriteLine("=== DB → CSV + SQL Sync Started ===");
+
+            while (true)
+            {
+                Console.WriteLine($"[{DateTime.UtcNow}] Starting cycle...");
+
+                try
+                {
+                    Data.db_to_csv();
+                    Database.csv_to_sql();
+                }
+                catch (Exception ex)
+                {
+                    Logger.log_error("MainLoop", ex);
+                }
+
+                Console.WriteLine($"[{DateTime.UtcNow}] Cycle complete. Waiting 5 minutes...\n");
+                Thread.Sleep(TimeSpan.FromMinutes(5));
+            }
+        }
+    }
+}
+
+
+
+
+
+
+
+
+using System;
+using System.Configuration;
+using System.Data.SQLite;
+using System.IO;
+
+namespace Assembly3DCamera
+{
+    class Data
+    {
+        public static void db_to_csv()
+        {
+            string dbFolder = ConfigurationManager.AppSettings["DbFolder"];
+            string csvFolder = ConfigurationManager.AppSettings["CsvFolder"];
+            string logFolder = ConfigurationManager.AppSettings["LogFolder"];
+
+            Directory.CreateDirectory(csvFolder);
+            Directory.CreateDirectory(logFolder);
+
+            string dataLog = Path.Combine(logFolder, "data.txt");
+
+            foreach (var dbFile in Directory.GetFiles(dbFolder, "*.db"))
+            {
+                try
+                {
+                    using (var conn = new SQLiteConnection($"Data Source={dbFile};Version=3;"))
+                    {
+                        conn.Open();
+
+                        using (var cmd = conn.CreateCommand())
+                        {
+                            cmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'";
+                            using (var reader = cmd.ExecuteReader())
+                            {
+                                while (reader.Read())
+                                {
+                                    string table = reader.GetString(0);
+                                    string csvPath = Path.Combine(csvFolder, $"{table}.csv");
+
+                                    export_table(conn, table, csvPath, dataLog, dbFile);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.log_error($"DB:{dbFile}", ex);
+                }
+            }
+        }
+
+        private static void export_table(SQLiteConnection conn, string table, string csvPath, string dataLog, string dbFile)
+        {
+            try
+            {
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = $"SELECT * FROM {table}";
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        using (var writer = new StreamWriter(csvPath, append: true))
+                        {
+                            int fieldCount = reader.FieldCount;
+
+                            if (writer.BaseStream.Length == 0)
+                            {
+                                for (int i = 0; i < fieldCount; i++)
+                                {
+                                    if (i > 0) writer.Write(",");
+                                    writer.Write(reader.GetName(i));
+                                }
+                                writer.WriteLine();
+                            }
+
+                            while (reader.Read())
+                            {
+                                string row = "";
+                                for (int i = 0; i < fieldCount; i++)
+                                {
+                                    if (i > 0) row += ",";
+                                    row += reader.GetValue(i).ToString();
+                                }
+
+                                if (!Logger.is_duplicate(row))
+                                {
+                                    writer.WriteLine(row);
+                                    Logger.update_data_log(dataLog, table);
+
+                                    Console.WriteLine($"[{DateTime.UtcNow}] DB:{Path.GetFileName(dbFile)} → Table:{table} exported to CSV");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.log_error($"Export:{table}", ex);
+            }
+        }
+    }
+}
+
+
+
+
+
+
+
+using System;
+using System.Configuration;
+using System.Data;
+using System.Data.SqlClient;
+using System.Data.SQLite;
+using System.IO;
+using System.Linq;
+
+namespace Assembly3DCamera
+{
+    class Database
+    {
+        public static void csv_to_sql()
+        {
+            string dbFolder = ConfigurationManager.AppSettings["DbFolder"];
+            string connStr = ConfigurationManager.AppSettings["SqlConnectionString"];
+            string dataLog = Path.Combine(ConfigurationManager.AppSettings["LogFolder"], "data.txt");
+
+            foreach (var dbFile in Directory.GetFiles(dbFolder, "*.db"))
+            {
+                try
+                {
+                    using (var conn = new SQLiteConnection($"Data Source={dbFile};Version=3;"))
+                    {
+                        conn.Open();
+
+                        using (var cmd = conn.CreateCommand())
+                        {
+                            cmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'";
+                            using (var reader = cmd.ExecuteReader())
+                            {
+                                while (reader.Read())
+                                {
+                                    string table = reader.GetString(0);
+                                    import_table(conn, table, connStr, dataLog, dbFile);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.log_error($"SQLImport:{dbFile}", ex);
+                }
+            }
+        }
+
+        private static void import_table(SQLiteConnection conn, string table, string connStr, string dataLog, string dbFile)
+        {
+            try
+            {
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = $"SELECT * FROM {table}";
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        DataTable dt = new DataTable();
+                        dt.Load(reader);
+
+                        using (var sqlConn = new SqlConnection(connStr))
+                        {
+                            sqlConn.Open();
+
+                            // create table if not exists
+                            string create = $"IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{table}') CREATE TABLE {table} (";
+                            for (int i = 0; i < dt.Columns.Count; i++)
+                            {
+                                create += $"[{dt.Columns[i].ColumnName}] NVARCHAR(MAX)";
+                                if (i < dt.Columns.Count - 1) create += ",";
+                            }
+                            create += ")";
+                            using (var cmdCreate = new SqlCommand(create, sqlConn))
+                            {
+                                cmdCreate.ExecuteNonQuery();
+                            }
+
+                            // insert new rows
+                            foreach (DataRow row in dt.Rows)
+                            {
+                                string rowStr = string.Join(",", row.ItemArray);
+                                if (!Logger.is_duplicate(rowStr))
+                                {
+                                    string cols = string.Join(",", dt.Columns.Cast<DataColumn>().Select(c => $"[{c.ColumnName}]"));
+                                    string vals = string.Join(",", dt.Columns.Cast<DataColumn>().Select((c, i) => $"@p{i}"));
+
+                                    string insert = $"INSERT INTO {table} ({cols}) VALUES ({vals})";
+                                    using (var cmdInsert = new SqlCommand(insert, sqlConn))
+                                    {
+                                        for (int i = 0; i < dt.Columns.Count; i++)
+                                            cmdInsert.Parameters.AddWithValue($"@p{i}", row[i]);
+                                        cmdInsert.ExecuteNonQuery();
+                                    }
+
+                                    Logger.update_data_log(dataLog, table);
+                                    Console.WriteLine($"[{DateTime.UtcNow}] DB:{Path.GetFileName(dbFile)} → Table:{table} inserted into SQL Server");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.log_error($"Import:{table}", ex);
+            }
+        }
+    }
+}
+
+
+
+
+
+
+
+
+using System;
+using System.IO;
+
+namespace Assembly3DCamera
+{
+    class Logger
+    {
+        private static readonly string logFolder = System.Configuration.ConfigurationManager.AppSettings["LogFolder"];
+        private static readonly string exceptionsFile = Path.Combine(logFolder, "exceptions.txt");
+        private static readonly string seenFile = Path.Combine(logFolder, "seen.txt");
+
+        public static void log_error(string src, Exception ex)
+        {
+            Directory.CreateDirectory(logFolder);
+            File.AppendAllText(exceptionsFile, $"[{DateTime.UtcNow}] {src}: {ex}\n");
+        }
+
+        public static bool is_duplicate(string row)
+        {
+            Directory.CreateDirectory(logFolder);
+            if (!File.Exists(seenFile)) File.WriteAllText(seenFile, "");
+
+            var lines = File.ReadAllLines(seenFile);
+            foreach (var l in lines)
+                if (l == row) return true;
+
+            File.AppendAllText(seenFile, row + Environment.NewLine);
+            return false;
+        }
+
+        public static void update_data_log(string file, string table)
+        {
+            Directory.CreateDirectory(logFolder);
+            File.WriteAllText(file, $"[{DateTime.UtcNow}] New data in {table}\n");
+        }
+    }
+}
+
+
+
+
+
+
+
