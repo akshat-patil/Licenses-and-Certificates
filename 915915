@@ -371,3 +371,156 @@ namespace Assembly3DCamera
         }
     }
 }
+
+
+
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data.SqlClient;
+using System.IO;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    public static class DatabaseProcessor
+    {
+        private static readonly string SqlConnStr = ConfigurationManager.AppSettings["SqlServerConnStr"];
+
+        public static void ExportAllDbsToSql(string vDB_CSD)
+        {
+            try
+            {
+                var dbFiles = Directory.GetFiles(vDB_CSD, "*.db");
+                if (dbFiles.Length == 0)
+                {
+                    Console.WriteLine($"[{DateTime.Now}] No .db files found in {vDB_CSD}");
+                    return;
+                }
+
+                foreach (var vDbFile in dbFiles)
+                {
+                    ExportDbToSql(vDbFile);
+                }
+
+                Console.WriteLine($"[{DateTime.Now}] SQL cycle complete.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"General DB-to-SQL error: {ex}");
+            }
+        }
+
+        private static void ExportDbToSql(string vDbFile)
+        {
+            using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
+            {
+                oConn.Open();
+                using (var oTblCmd = oConn.CreateCommand())
+                {
+                    oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+                    using (var oTblReader = oTblCmd.ExecuteReader())
+                    {
+                        List<string> vTables = new List<string>();
+                        while (oTblReader.Read())
+                            vTables.Add(oTblReader.GetString(0));
+
+                        foreach (string vTable in vTables)
+                        {
+                            try
+                            {
+                                ExportTableToSql(oConn, vTable, vDbFile);
+                            }
+                            catch (Exception exTable)
+                            {
+                                Logger.Log($"SQL Insert error in '{vTable}' from {vDbFile}: {exTable}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void ExportTableToSql(SqliteConnection oConn, string vTableName, string vDbFile)
+        {
+            string vSafeTable = vTableName.Replace("\"", "\"\"");
+            string vQuery = $"SELECT ROWID, * FROM \"{vSafeTable}\";";
+
+            using (var oCmd = oConn.CreateCommand())
+            {
+                oCmd.CommandText = vQuery;
+                using (var oReader = oCmd.ExecuteReader())
+                {
+                    if (!oReader.HasRows) return;
+
+                    using (SqlConnection sqlConn = new SqlConnection(SqlConnStr))
+                    {
+                        sqlConn.Open();
+
+                        // Ensure SQL table exists
+                        EnsureSqlTable(sqlConn, oConn, vTableName);
+
+                        int vRowCount = 0;
+
+                        while (oReader.Read())
+                        {
+                            long vRowId = oReader.GetInt64(0);
+                            string uniqueKey = $"{Path.GetFileName(vDbFile)}|{vTableName}|{vRowId}";
+
+                            if (DataTracker.IsProcessed(uniqueKey)) continue;
+
+                            List<string> values = new List<string>();
+                            for (int i = 1; i < oReader.FieldCount; i++)
+                            {
+                                if (oReader.IsDBNull(i)) values.Add("NULL");
+                                else values.Add("'" + oReader.GetValue(i).ToString().Replace("'", "''") + "'");
+                            }
+
+                            string sql = $"INSERT INTO [{vTableName}] VALUES ({string.Join(",", values)});";
+                            using (SqlCommand cmd = new SqlCommand(sql, sqlConn))
+                            {
+                                cmd.ExecuteNonQuery();
+                            }
+
+                            DataTracker.MarkProcessed(uniqueKey);
+                            vRowCount++;
+                        }
+
+                        if (vRowCount > 0)
+                            Console.WriteLine($"[{DateTime.Now}] Inserted {vRowCount} new rows into SQL table '{vTableName}' from {Path.GetFileName(vDbFile)}");
+                    }
+                }
+            }
+        }
+
+        private static void EnsureSqlTable(SqlConnection sqlConn, SqliteConnection sqliteConn, string vTableName)
+        {
+            List<string> columns = new List<string>();
+
+            using (var cmd = sqliteConn.CreateCommand())
+            {
+                cmd.CommandText = $"PRAGMA table_info(\"{vTableName}\");";
+                using (var reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        string colName = reader.GetString(1);
+                        columns.Add($"[{colName}] NVARCHAR(MAX)");
+                    }
+                }
+            }
+
+            if (columns.Count == 0) return;
+
+            string checkTableSql =
+                $"IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='{vTableName}' AND xtype='U') " +
+                $"CREATE TABLE [{vTableName}] ({string.Join(",", columns)});";
+
+            using (SqlCommand cmd = new SqlCommand(checkTableSql, sqlConn))
+            {
+                cmd.ExecuteNonQuery();
+                Console.WriteLine($"[{DateTime.Now}] Table '{vTableName}' ensured in SQL.");
+            }
+        }
+    }
+}
