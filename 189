@@ -1,0 +1,97 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    public static class DailyCsvExporter
+    {
+        public static void ExportDaily(SqliteConnection oConn, string tableName, string baseCsvPath,
+                                       string dbKey, Dictionary<string, long> checkpoints)
+        {
+            // --- Create folder structure based on current date ---
+            string todayPath = Path.Combine(
+                baseCsvPath,
+                DateTime.Now.ToString("yyyy"),
+                DateTime.Now.ToString("MM"),
+                DateTime.Now.ToString("dd")
+            );
+
+            Directory.CreateDirectory(todayPath);
+
+            // --- Get checkpoint key (per table + per day) ---
+            string cpKey = $"{dbKey}|{tableName}|{DateTime.Now:yyyyMMdd}";
+            long lastRowId = checkpoints.ContainsKey(cpKey) ? checkpoints[cpKey] : 0;
+            long newLast = lastRowId;
+
+            // --- Query only new rows since last checkpoint ---
+            string q = $"SELECT ROWID, * FROM \"{tableName}\" WHERE ROWID > {lastRowId};";
+
+            using (var cmd = oConn.CreateCommand())
+            {
+                cmd.CommandText = q;
+                using (var reader = cmd.ExecuteReader())
+                {
+                    if (!reader.HasRows) return;
+
+                    string csvFile = Path.Combine(todayPath, $"{SanitizeFileName(tableName)}.csv");
+                    bool writeHeader = !File.Exists(csvFile);
+
+                    using (var writer = new StreamWriter(csvFile, true, Encoding.UTF8))
+                    {
+                        int cols = reader.FieldCount;
+
+                        // write header once
+                        if (writeHeader)
+                        {
+                            for (int i = 1; i < cols; i++)
+                            {
+                                if (i > 1) writer.Write(",");
+                                writer.Write(EscapeCsv(reader.GetName(i)));
+                            }
+                            writer.WriteLine();
+                        }
+
+                        int rowCount = 0;
+                        while (reader.Read())
+                        {
+                            newLast = reader.GetInt64(0);
+                            for (int i = 1; i < cols; i++)
+                            {
+                                if (i > 1) writer.Write(",");
+                                writer.Write(reader.IsDBNull(i) ? "" : EscapeCsv(reader.GetValue(i).ToString()));
+                            }
+                            writer.WriteLine();
+                            rowCount++;
+                        }
+
+                        if (rowCount > 0)
+                        {
+                            checkpoints[cpKey] = newLast;
+                            Console.WriteLine($"[{DateTime.Now}] Exported {rowCount} rows from '{tableName}' to {csvFile}");
+                        }
+                    }
+                }
+            }
+        }
+
+        private static string EscapeCsv(string val)
+        {
+            if (val == null) return "";
+            bool mustQuote = val.Contains(",") || val.Contains("\"") || val.Contains("\n") || val.Contains("\r");
+            if (val.Contains("\"")) val = val.Replace("\"", "\"\"");
+            return mustQuote ? $"\"{val}\"" : val;
+        }
+
+        private static string SanitizeFileName(string name)
+        {
+            var invalid = Path.GetInvalidFileNameChars();
+            var sb = new StringBuilder();
+            foreach (var c in name)
+                sb.Append(invalid.Contains(c) ? '_' : c);
+            return sb.ToString();
+        }
+    }
+}
