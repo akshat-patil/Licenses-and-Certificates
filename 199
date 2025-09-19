@@ -130,3 +130,33 @@ namespace Assembly3DCamera
         }
     }
 }
+
+
+
+
+
+private static Dictionary<string, long> LoadDailyCheckpoints(string todayCpFile, string todayPath)
+{
+    if (File.Exists(todayCpFile))
+        return LoadCheckpoints(todayCpFile);
+
+    // If today's file not found, look for yesterday's
+    var yesterday = DateTime.Now.AddDays(-1);
+    string yesterdayPath = Path.Combine(
+        Directory.GetParent(Directory.GetParent(Directory.GetParent(todayPath).FullName).FullName).FullName,
+        yesterday.ToString("yyyy"),
+        yesterday.ToString("MM"),
+        yesterday.ToString("dd")
+    );
+
+    string yesterdayCpFile = Path.Combine(yesterdayPath, $"{yesterday:dd}checkpoints.txt");
+
+    if (File.Exists(yesterdayCpFile))
+        return LoadCheckpoints(yesterdayCpFile);
+
+    return new Dictionary<string, long>();
+}
+
+
+
+Dictionary<string, long> checkpoints = LoadDailyCheckpoints(cpFile, todayPath);
