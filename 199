@@ -20,9 +20,11 @@ namespace Assembly3DCamera
             );
             Directory.CreateDirectory(todayPath);
 
-            // --- Daily checkpoint file path ---
-            string cpFile = Path.Combine(todayPath, $"{DateTime.Now:dd}checkpoints.txt");
-            Dictionary<string, long> checkpoints = LoadCheckpoints(cpFile);
+            // --- Today's checkpoint file path ---
+            string todayCpFile = Path.Combine(todayPath, $"{DateTime.Now:dd}checkpoints.txt");
+
+            // --- Load today's checkpoints (or bootstrap from yesterday if needed) ---
+            Dictionary<string, long> checkpoints = LoadDailyCheckpoints(todayCpFile, todayPath);
 
             // --- Build checkpoint key ---
             string checkpointKey = dbKey + "|" + tableName;
@@ -73,7 +75,7 @@ namespace Assembly3DCamera
                         if (rowCount > 0)
                         {
                             checkpoints[checkpointKey] = newLast;
-                            SaveCheckpoints(cpFile, checkpoints);
+                            SaveCheckpoints(todayCpFile, checkpoints);
 
                             Console.WriteLine($"[{DateTime.Now}] Exported {rowCount} rows from '{tableName}' to {csvFile}");
                         }
@@ -82,12 +84,33 @@ namespace Assembly3DCamera
             }
         }
 
-        // --- Helper: Load checkpoints ---
+        // --- Load today's checkpoints, or bootstrap from yesterday's file ---
+        private static Dictionary<string, long> LoadDailyCheckpoints(string todayCpFile, string todayPath)
+        {
+            if (File.Exists(todayCpFile))
+                return LoadCheckpoints(todayCpFile);
+
+            // Look for yesterday's checkpoints
+            var yesterday = DateTime.Now.AddDays(-1);
+            string yesterdayPath = Path.Combine(
+                Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(todayPath))),
+                yesterday.ToString("yyyy"),
+                yesterday.ToString("MM"),
+                yesterday.ToString("dd")
+            );
+
+            string yesterdayCpFile = Path.Combine(yesterdayPath, $"{yesterday:dd}checkpoints.txt");
+
+            if (File.Exists(yesterdayCpFile))
+                return LoadCheckpoints(yesterdayCpFile);
+
+            return new Dictionary<string, long>();
+        }
+
+        // --- Helper: Load checkpoints file ---
         private static Dictionary<string, long> LoadCheckpoints(string checkpointFile)
         {
             var dict = new Dictionary<string, long>();
-            if (!File.Exists(checkpointFile)) return dict;
-
             foreach (var line in File.ReadAllLines(checkpointFile))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
@@ -102,7 +125,7 @@ namespace Assembly3DCamera
             return dict;
         }
 
-        // --- Helper: Save checkpoints ---
+        // --- Helper: Save checkpoints file ---
         private static void SaveCheckpoints(string checkpointFile, Dictionary<string, long> checkpoints)
         {
             var lines = new List<string>();
@@ -130,33 +153,3 @@ namespace Assembly3DCamera
         }
     }
 }
-
-
-
-
-
-private static Dictionary<string, long> LoadDailyCheckpoints(string todayCpFile, string todayPath)
-{
-    if (File.Exists(todayCpFile))
-        return LoadCheckpoints(todayCpFile);
-
-    // If today's file not found, look for yesterday's
-    var yesterday = DateTime.Now.AddDays(-1);
-    string yesterdayPath = Path.Combine(
-        Directory.GetParent(Directory.GetParent(Directory.GetParent(todayPath).FullName).FullName).FullName,
-        yesterday.ToString("yyyy"),
-        yesterday.ToString("MM"),
-        yesterday.ToString("dd")
-    );
-
-    string yesterdayCpFile = Path.Combine(yesterdayPath, $"{yesterday:dd}checkpoints.txt");
-
-    if (File.Exists(yesterdayCpFile))
-        return LoadCheckpoints(yesterdayCpFile);
-
-    return new Dictionary<string, long>();
-}
-
-
-
-Dictionary<string, long> checkpoints = LoadDailyCheckpoints(cpFile, todayPath);
