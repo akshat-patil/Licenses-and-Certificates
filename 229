@@ -107,7 +107,9 @@ namespace Assembly3DCamera
                     }
                 }
 
+                // save global checkpoints at the end
                 DbToCsv.SaveCheckpoints(vCheckpointFile, vLastExportedRowId);
+
                 Console.WriteLine($"[{DateTime.Now}] Check complete — all tables processed.");
             }
             catch (Exception ex)
