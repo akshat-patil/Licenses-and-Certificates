@@ -1,0 +1,120 @@
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    class Program
+    {
+        private static Dictionary<string, long> vLastExportedRowId = new Dictionary<string, long>();
+        private static Timer oTimer;
+
+        static void Main(string[] args)
+        {
+            string vDB_CSD = ConfigurationManager.AppSettings["DB_CSD"],
+                   vDb_Csv = ConfigurationManager.AppSettings["Db_Csv"],
+                   vLogFile = Path.Combine(vDB_CSD, "exceptions.txt"),
+                   vCheckpointFile = Path.Combine(vDB_CSD, "data.txt");
+
+            if (string.IsNullOrWhiteSpace(vDB_CSD) || string.IsNullOrWhiteSpace(vDb_Csv))
+            {
+                Console.WriteLine("Please set DB_CSD and Db_Csv in App.config.");
+                return;
+            }
+
+            Directory.CreateDirectory(vDb_Csv);
+            if (!File.Exists(vLogFile)) File.Create(vLogFile).Dispose();
+
+            vLastExportedRowId = DbToCsv.LoadCheckpoints(vCheckpointFile);
+
+            oTimer = new Timer(delegate { ExportDb(vDB_CSD, vDb_Csv, vLogFile, vCheckpointFile); },
+                               null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+
+            Console.WriteLine("Export started.");
+            Console.ReadLine();
+        }
+
+        static void ExportDb(string vDB_CSD, string vDb_Csv, string vLogFile, string vCheckpointFile)
+        {
+            try
+            {
+                string vDbFile = Directory.GetFiles(vDB_CSD, "*.db")
+                                          .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+                                          .FirstOrDefault();
+
+                if (vDbFile == null)
+                {
+                    Console.WriteLine($"[{DateTime.Now}] No .db file found in: " + vDB_CSD);
+                    return;
+                }
+
+                string dbKey = Path.GetFileName(vDbFile);
+
+                using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
+                {
+                    oConn.Open();
+                    using (var oTblCmd = oConn.CreateCommand())
+                    {
+                        oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+                        using (var oTblReader = oTblCmd.ExecuteReader())
+                        {
+                            List<string> tables = new List<string>();
+                            while (oTblReader.Read())
+                                tables.Add(oTblReader.GetString(0));
+
+                            foreach (string vTable in tables)
+                            {
+                                try
+                                {
+                                    // Global cumulative CSV export
+                                    DbToCsv.mDbToCsv(oConn, vTable, vDb_Csv, dbKey, vLastExportedRowId);
+
+                                    // SQL Server export
+                                    DbToServer.mDbToServer(oConn, vTable, dbKey, vLastExportedRowId);
+
+                                    // Daily export into YYYY/MM/DD folders
+                                    DailyCsvExporter.ExportDaily(oConn, vTable, vDb_Csv, dbKey);
+                                }
+                                catch (Exception exTable)
+                                {
+                                    string vMessage = $"[{DateTime.Now}] Table '{vTable}': {exTable}\n";
+                                    File.AppendAllText(vLogFile, vMessage);
+                                }
+                            }
+
+                            // After all tables processed → merge daily CSVs into combined.csv
+                            string todayPath = Path.Combine(
+                                vDb_Csv,
+                                DateTime.Now.ToString("yyyy"),
+                                DateTime.Now.ToString("MM"),
+                                DateTime.Now.ToString("dd")
+                            );
+                            try
+                            {
+                                CsvMerger.MergeByLot(todayPath);
+                            }
+                            catch (Exception exMerge)
+                            {
+                                string vMessage = $"[{DateTime.Now}] CSV Merge failed: {exMerge}\n";
+                                File.AppendAllText(vLogFile, vMessage);
+                                Console.WriteLine("Error merging CSVs: " + exMerge.Message);
+                            }
+                        }
+                    }
+                }
+
+                DbToCsv.SaveCheckpoints(vCheckpointFile, vLastExportedRowId);
+                Console.WriteLine($"[{DateTime.Now}] Check complete — all tables processed.");
+            }
+            catch (Exception ex)
+            {
+                File.AppendAllText(vLogFile, $"[{DateTime.Now}] General DB read error: {ex}\n");
+                Console.WriteLine("Error reading DB: " + ex.Message);
+            }
+        }
+    }
+}
