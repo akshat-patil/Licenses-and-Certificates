@@ -1,122 +1,158 @@
+using Microsoft.Data.Sqlite;
 using System;
 using System.Collections.Generic;
-using System.Configuration;
 using System.IO;
 using System.Linq;
-using System.Threading;
-using Microsoft.Data.Sqlite;
+using System.Text;
 
 namespace Assembly3DCamera
 {
-    class Program
+    public static class DailyCsvExporter
     {
-        private static Dictionary<string, long> vLastExportedRowId = new Dictionary<string, long>();
-        private static Timer oTimer;
-
-        static void Main(string[] args)
+        public static void ExportDaily(SqliteConnection oConn, string tableName, string baseCsvPath,
+                                       string dbKey)
         {
-            string vDB_CSD = ConfigurationManager.AppSettings["DB_CSD"],
-                   vDb_Csv = ConfigurationManager.AppSettings["Db_Csv"],
-                   vLogFile = Path.Combine(vDB_CSD, "exceptions.txt"),
-                   vCheckpointFile = Path.Combine(vDB_CSD, "data.txt");
+            string todayPath = Path.Combine(
+                baseCsvPath,
+                DateTime.Now.ToString("yyyy"),
+                DateTime.Now.ToString("MM"),
+                DateTime.Now.ToString("dd")
+            );
+            Directory.CreateDirectory(todayPath);
 
-            if (string.IsNullOrWhiteSpace(vDB_CSD) || string.IsNullOrWhiteSpace(vDb_Csv))
+            string todayCpFile = Path.Combine(todayPath, $"{DateTime.Now:dd}checkpoints.txt");
+
+            Dictionary<string, long> checkpoints = LoadDailyCheckpoints(todayCpFile, todayPath);
+
+            string checkpointKey = dbKey + "|" + tableName;
+            long lastRowId = checkpoints.ContainsKey(checkpointKey) ? checkpoints[checkpointKey] : 0;
+            long newLast = lastRowId;
+
+            string query = $"SELECT ROWID, * FROM \"{tableName}\" WHERE ROWID > {lastRowId};";
+
+            using (var cmd = oConn.CreateCommand())
             {
-                Console.WriteLine("Please set DB_CSD and Db_Csv in App.config.");
-                return;
-            }
-
-            Directory.CreateDirectory(vDb_Csv);
-            if (!File.Exists(vLogFile)) File.Create(vLogFile).Dispose();
-
-            vLastExportedRowId = DbToCsv.LoadCheckpoints(vCheckpointFile);
-
-            oTimer = new Timer(delegate { ExportDb(vDB_CSD, vDb_Csv, vLogFile, vCheckpointFile); },
-                               null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
-
-            Console.WriteLine("Export started.");
-            Console.ReadLine();
-        }
-
-        static void ExportDb(string vDB_CSD, string vDb_Csv, string vLogFile, string vCheckpointFile)
-        {
-            try
-            {
-                string vDbFile = Directory.GetFiles(vDB_CSD, "*.db")
-                                          .OrderByDescending(f => new FileInfo(f).LastWriteTime)
-                                          .FirstOrDefault();
-
-                if (vDbFile == null)
+                cmd.CommandText = query;
+                using (var reader = cmd.ExecuteReader())
                 {
-                    Console.WriteLine($"[{DateTime.Now}] No .db file found in: " + vDB_CSD);
-                    return;
-                }
+                    if (!reader.HasRows) return;
 
-                string dbKey = Path.GetFileName(vDbFile);
+                    string csvFile = Path.Combine(todayPath, $"{SanitizeFileName(tableName)}.csv");
+                    bool writeHeader = !File.Exists(csvFile);
 
-                using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
-                {
-                    oConn.Open();
-                    using (var oTblCmd = oConn.CreateCommand())
+                    using (var writer = new StreamWriter(csvFile, true, Encoding.UTF8))
                     {
-                        oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
-                        using (var oTblReader = oTblCmd.ExecuteReader())
+                        int cols = reader.FieldCount;
+
+                        if (writeHeader)
                         {
-                            List<string> tables = new List<string>();
-                            while (oTblReader.Read())
-                                tables.Add(oTblReader.GetString(0));
-
-                            foreach (string vTable in tables)
+                            for (int i = 1; i < cols; i++)
                             {
-                                try
-                                {
-                                    // Global cumulative CSV export
-                                    DbToCsv.mDbToCsv(oConn, vTable, vDb_Csv, dbKey, vLastExportedRowId);
-
-                                    // SQL Server export
-                                    DbToServer.mDbToServer(oConn, vTable, dbKey, vLastExportedRowId);
-
-                                    // Daily export into YYYY/MM/DD folders
-                                    DailyCsvExporter.ExportDaily(oConn, vTable, vDb_Csv, dbKey);
-                                }
-                                catch (Exception exTable)
-                                {
-                                    string vMessage = $"[{DateTime.Now}] Table '{vTable}': {exTable}\n";
-                                    File.AppendAllText(vLogFile, vMessage);
-                                }
+                                if (i > 1) writer.Write(",");
+                                writer.Write(EscapeCsv(reader.GetName(i)));
                             }
+                            writer.WriteLine();
+                        }
 
-                            // After all tables processed → merge daily CSVs into combined.csv
-                            string todayPath = Path.Combine(
-                                vDb_Csv,
-                                DateTime.Now.ToString("yyyy"),
-                                DateTime.Now.ToString("MM"),
-                                DateTime.Now.ToString("dd")
-                            );
-                            try
+                        int rowCount = 0;
+                        while (reader.Read())
+                        {
+                            newLast = reader.GetInt64(0);
+                            for (int i = 1; i < cols; i++)
                             {
-                                CsvMerger.MergeByLot(todayPath);
+                                if (i > 1) writer.Write(",");
+                                writer.Write(reader.IsDBNull(i) ? "" : EscapeCsv(reader.GetValue(i).ToString()));
                             }
-                            catch (Exception exMerge)
-                            {
-                                string vMessage = $"[{DateTime.Now}] CSV Merge failed: {exMerge}\n";
-                                File.AppendAllText(vLogFile, vMessage);
-                                Console.WriteLine("Error merging CSVs: " + exMerge.Message);
-                            }
+                            writer.WriteLine();
+                            rowCount++;
+                        }
+
+                        if (rowCount > 0)
+                        {
+                            checkpoints[checkpointKey] = newLast;
+                            SaveCheckpoints(todayCpFile, checkpoints);
+
+                            Console.WriteLine($"[{DateTime.Now}] Exported {rowCount} rows from '{tableName}' to {csvFile}");
                         }
                     }
                 }
-
-                // save global checkpoints at the end
-                DbToCsv.SaveCheckpoints(vCheckpointFile, vLastExportedRowId);
-
-                Console.WriteLine($"[{DateTime.Now}] Check complete — all tables processed.");
             }
-            catch (Exception ex)
+        }
+
+        /// <summary>
+        /// Loads today's checkpoints, or if missing, searches backwards until it finds the most recent available file.
+        /// </summary>
+        private static Dictionary<string, long> LoadDailyCheckpoints(string todayCpFile, string todayPath)
+        {
+            if (File.Exists(todayCpFile))
+                return LoadCheckpoints(todayCpFile);
+
+            DateTime probeDay = DateTime.Now.AddDays(-1);
+
+            while (probeDay.Year >= 2000) // safe lower bound
             {
-                File.AppendAllText(vLogFile, $"[{DateTime.Now}] General DB read error: {ex}\n");
-                Console.WriteLine("Error reading DB: " + ex.Message);
+                string probePath = Path.Combine(
+                    Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(todayPath))),
+                    probeDay.ToString("yyyy"),
+                    probeDay.ToString("MM"),
+                    probeDay.ToString("dd")
+                );
+
+                string probeCpFile = Path.Combine(probePath, $"{probeDay:dd}checkpoints.txt");
+
+                if (File.Exists(probeCpFile))
+                {
+                    Console.WriteLine($"[{DateTime.Now}] No checkpoints for today, using last available from {probeDay:yyyy-MM-dd}");
+                    return LoadCheckpoints(probeCpFile);
+                }
+
+                probeDay = probeDay.AddDays(-1);
             }
+
+            // Nothing found at all
+            return new Dictionary<string, long>();
+        }
+
+        private static Dictionary<string, long> LoadCheckpoints(string checkpointFile)
+        {
+            var dict = new Dictionary<string, long>();
+            foreach (var line in File.ReadAllLines(checkpointFile))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                int idx = line.LastIndexOf('|');
+                if (idx <= 0) continue;
+
+                string key = line.Substring(0, idx);
+                string valStr = line.Substring(idx + 1);
+                if (long.TryParse(valStr, out long val))
+                    dict[key] = val;
+            }
+            return dict;
+        }
+
+        private static void SaveCheckpoints(string checkpointFile, Dictionary<string, long> checkpoints)
+        {
+            var lines = new List<string>();
+            foreach (var kv in checkpoints)
+                lines.Add(kv.Key + "|" + kv.Value);
+            File.WriteAllLines(checkpointFile, lines);
+        }
+
+        private static string EscapeCsv(string val)
+        {
+            if (val == null) return "";
+            bool mustQuote = val.Contains(",") || val.Contains("\"") || val.Contains("\n") || val.Contains("\r");
+            if (val.Contains("\"")) val = val.Replace("\"", "\"\"");
+            return mustQuote ? $"\"{val}\"" : val;
+        }
+
+        private static string SanitizeFileName(string name)
+        {
+            var invalid = Path.GetInvalidFileNameChars();
+            var sb = new StringBuilder();
+            foreach (var c in name)
+                sb.Append(invalid.Contains(c) ? '_' : c);
+            return sb.ToString();
         }
     }
 }
