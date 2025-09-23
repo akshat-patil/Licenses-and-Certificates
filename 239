@@ -1,0 +1,116 @@
+// At the very end of ExportDb, after saving checkpoints:
+DbToCsv.SaveCheckpoints(vCheckpointFile, vLastExportedRowId);
+
+// After finishing today's exports → generate yesterday's combined file if not already created
+try
+{
+    CsvCombiner.CombineYesterdayByLot(vDb_Csv);
+}
+catch (Exception exCombine)
+{
+    string vMessage = $"[{DateTime.Now}] CSV Combine failed: {exCombine}\n";
+    File.AppendAllText(vLogFile, vMessage);
+    Console.WriteLine("Error combining CSVs: " + exCombine.Message);
+}
+
+Console.WriteLine($"[{DateTime.Now}] Check complete — all tables processed.");
+
+
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+
+namespace Assembly3DCamera
+{
+    public static class CsvCombiner
+    {
+        /// <summary>
+        /// Combines all CSV files in yesterday's folder into a single DDMMYYYY.csv file.
+        /// This ensures the day is complete before combining.
+        /// </summary>
+        public static void CombineYesterdayByLot(string baseCsvPath)
+        {
+            DateTime yesterday = DateTime.Now.AddDays(-1);
+            string folderPath = Path.Combine(
+                baseCsvPath,
+                yesterday.ToString("yyyy"),
+                yesterday.ToString("MM"),
+                yesterday.ToString("dd")
+            );
+
+            if (!Directory.Exists(folderPath))
+            {
+                Console.WriteLine($"[{DateTime.Now}] Yesterday folder not found: {folderPath}");
+                return;
+            }
+
+            string outputFileName = yesterday.ToString("ddMMyyyy") + ".csv";
+            string combinedFile = Path.Combine(folderPath, outputFileName);
+
+            if (File.Exists(combinedFile))
+            {
+                Console.WriteLine($"[{DateTime.Now}] Combined file already exists: {combinedFile}");
+                return; // already done
+            }
+
+            var csvFiles = Directory.GetFiles(folderPath, "*.csv")
+                                    .Where(f => !f.EndsWith(outputFileName)) // exclude target file
+                                    .ToList();
+
+            if (csvFiles.Count == 0)
+            {
+                Console.WriteLine($"[{DateTime.Now}] No CSV files to combine in {folderPath}");
+                return;
+            }
+
+            List<string> headers = null;
+            var rows = new List<string[]>();
+
+            foreach (var file in csvFiles)
+            {
+                var lines = File.ReadAllLines(file);
+                if (lines.Length == 0) continue;
+
+                var fileHeaders = lines[0].Split(',');
+                if (headers == null)
+                {
+                    headers = fileHeaders.ToList();
+                }
+
+                for (int i = 1; i < lines.Length; i++)
+                {
+                    if (string.IsNullOrWhiteSpace(lines[i])) continue;
+                    rows.Add(lines[i].Split(','));
+                }
+            }
+
+            if (headers == null || rows.Count == 0)
+            {
+                Console.WriteLine($"[{DateTime.Now}] No valid rows found in {folderPath}");
+                return;
+            }
+
+            int lotIndex = headers.IndexOf("LOT");
+            if (lotIndex == -1)
+            {
+                Console.WriteLine($"[{DateTime.Now}] LOT column not found, cannot combine.");
+                return;
+            }
+
+            var sortedRows = rows.OrderBy(r => r[lotIndex]).ToList();
+
+            using (var writer = new StreamWriter(combinedFile))
+            {
+                writer.WriteLine(string.Join(",", headers));
+                foreach (var row in sortedRows)
+                {
+                    writer.WriteLine(string.Join(",", row));
+                }
+            }
+
+            Console.WriteLine($"[{DateTime.Now}] Combined CSV created: {combinedFile}");
+        }
+    }
+}
