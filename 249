@@ -127,3 +127,184 @@ namespace Assembly3DCamera
         }
     }
 }
+
+
+
+
+
+
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using Microsoft.Data.Sqlite;
+
+namespace Assembly3DCamera
+{
+    class Program
+    {
+        private static Dictionary<string, long> vLastExportedRowId = new Dictionary<string, long>();
+        private static Timer oTimer;
+
+        static void Main(string[] args)
+        {
+            string vDB_CSD = ConfigurationManager.AppSettings["DB_CSD"], vDb_Csv = ConfigurationManager.AppSettings["Db_Csv"], vLogPath = ConfigurationManager.AppSettings["LogPath"];
+
+            if (string.IsNullOrWhiteSpace(vDB_CSD) || string.IsNullOrWhiteSpace(vDb_Csv) || string.IsNullOrWhiteSpace(vLogPath))
+            {
+                Console.WriteLine("Please set DB_CSD, Db_Csv, and LogPath in App.config.");
+                return;
+            }
+
+            string vLogFolder = Path.Combine(vLogPath, "log");
+            Directory.CreateDirectory(vLogFolder);
+
+            Console.WriteLine("Log folder path: " + vLogFolder);
+
+            string vLogFile = Path.Combine(vLogFolder, "exceptions.txt"), vCheckpointFile = Path.Combine(vLogFolder, "data.txt");
+
+            Directory.CreateDirectory(vDb_Csv);
+            if (!File.Exists(vLogFile)) File.Create(vLogFile).Dispose();
+
+            vLastExportedRowId = DbToCsv.LoadCheckpoints(vCheckpointFile);
+
+            oTimer = new Timer(delegate { ExportDb(vDB_CSD, vDb_Csv, vLogFile, vCheckpointFile); }, null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+
+            Console.WriteLine("Export started.");
+            Console.ReadLine();
+        }
+
+        static void ExportDb(string vDB_CSD, string vDb_Csv, string vLogFile, string vCheckpointFile)
+        {
+            try
+            {
+                string vDbFile = Directory.GetFiles(vDB_CSD, "*.db")
+                    .OrderByDescending(f => new FileInfo(f)
+                    .LastWriteTime).FirstOrDefault();
+
+                if (vDbFile == null)
+                {
+                    Console.WriteLine($"[{DateTime.Now}] No .db file found in: " + vDB_CSD);
+                    return;
+                }
+
+                string dbKey = Path.GetFileName(vDbFile);
+
+                long fileTicks = File.GetLastWriteTimeUtc(vDbFile).Ticks;
+                string fileVerKey = "FILE | " + dbKey;
+                if (!vLastExportedRowId.ContainsKey(fileVerKey) || vLastExportedRowId[fileVerKey] != fileTicks)
+                {
+                    var keysToRemove = vLastExportedRowId.Keys
+                        .Where(k => k.StartsWith(dbKey + "|") || k.StartsWith("SQL|" + dbKey + "|"))
+                        .ToList();
+
+                    foreach (var k in keysToRemove)
+                        vLastExportedRowId.Remove(k);
+
+                    vLastExportedRowId[fileVerKey] = fileTicks;
+                    Console.WriteLine($"[{DateTime.Now}] Detected new/changed DB file '{dbKey}'. Resetting checkpoints for this file.");
+                }
+
+                // --------------------------------------------------------------------
+                // Get table list with a short-lived connection (release handle quickly)
+                // --------------------------------------------------------------------
+                List<string> vTables = new List<string>();
+                try
+                {
+                    using (var oConn = new SqliteConnection("Data Source=" + vDbFile))
+                    {
+                        oConn.Open();
+                        using (var oTblCmd = oConn.CreateCommand())
+                        {
+                            oTblCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';";
+                            using (var oTblReader = oTblCmd.ExecuteReader())
+                            {
+                                while (oTblReader.Read())
+                                    vTables.Add(oTblReader.GetString(0));
+                            }
+                        }
+                    } // connection disposed here
+                }
+                catch (SqliteException sqlEx)
+                {
+                    File.AppendAllText(vLogFile, $"[{DateTime.Now}] SQLite error reading table list: {sqlEx}\n");
+                    Console.WriteLine($"[{DateTime.Now}] SQLite error reading table list, will retry next cycle.");
+                    return;
+                }
+                catch (IOException ioEx)
+                {
+                    File.AppendAllText(vLogFile, $"[{DateTime.Now}] IO error reading DB file: {ioEx}\n");
+                    Console.WriteLine($"[{DateTime.Now}] IO error reading DB file (likely in use), will retry next cycle.");
+                    return;
+                }
+
+                // --------------------------------------------------------------------
+                // Process each table using a per-table connection (quick open/close)
+                // --------------------------------------------------------------------
+                foreach (string vTable in vTables)
+                {
+                    try
+                    {
+                        using (var tableConn = new SqliteConnection("Data Source=" + vDbFile))
+                        {
+                            tableConn.Open();
+
+                            // call existing exports (signatures unchanged)
+                            DbToCsv.mDbToCsv(tableConn, vTable, vDb_Csv, vLogFile, dbKey, vCheckpointFile, vLastExportedRowId);
+                            DbToServer.mDbToServer(tableConn, vTable, dbKey, vLogFile, vCheckpointFile, vLastExportedRowId);
+                            DailyCsvExporter.ExportDaily(tableConn, vTable, vDb_Csv, dbKey);
+
+                            // update checkpoints per table (keeps behavior same as before)
+                            DbToCsv.mCheckpoints(vCheckpointFile, vLastExportedRowId);
+                        } // tableConn disposed here - file handle released
+                    }
+                    catch (SqliteException sqlEx)
+                    {
+                        string vMessage = $"[{DateTime.Now}] SQLite error on table '{vTable}': {sqlEx}\n";
+                        File.AppendAllText(vLogFile, vMessage);
+                        Console.WriteLine($"[{DateTime.Now}] SQLite error on table '{vTable}', skipping table this cycle.");
+                        // continue with next table
+                    }
+                    catch (IOException ioEx)
+                    {
+                        string vMessage = $"[{DateTime.Now}] IO error on table '{vTable}': {ioEx}\n";
+                        File.AppendAllText(vLogFile, vMessage);
+                        Console.WriteLine($"[{DateTime.Now}] IO error on table '{vTable}', skipping table this cycle.");
+                    }
+                    catch (Exception exTable)
+                    {
+                        string vMessage = $"[{DateTime.Now}] Table '{vTable}': {exTable}\n";
+                        File.AppendAllText(vLogFile, vMessage);
+                        Console.WriteLine($"[{DateTime.Now}] Error processing table '{vTable}', see log.");
+                    }
+                }
+
+                // Save global checkpoints at the end (same call you used before)
+                DbToCsv.mCheckpoints(vCheckpointFile, vLastExportedRowId);
+
+                // Always print the cycle completion message (every 5 minutes)
+                Console.WriteLine($"[{DateTime.Now}] Check complete — all tables processed.");
+
+                // After finishing today's exports → create yesterday's combined CSV (if needed)
+                try
+                {
+                    CsvCombiner.CombineYesterdayByLot(vDb_Csv);
+                }
+                catch (Exception exCombine)
+                {
+                    string vMessage = $"[{DateTime.Now}] CSV Combine failed: {exCombine}\n";
+                    File.AppendAllText(vLogFile, vMessage);
+                    Console.WriteLine("Error combining CSVs: " + exCombine.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                // fallback general error (should be rare)
+                File.AppendAllText(vLogFile, $"[{DateTime.Now}] General DB read error: {ex}\n");
+                Console.WriteLine("Error reading DB: " + ex.Message);
+            }
+        }
+    }
+}
