@@ -1,0 +1,433 @@
+using ClosedXML.Excel;
+using DocumentFormat.OpenXml.Wordprocessing;
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data;
+using System.Data.OleDb;
+using System.Data.SqlClient;
+using System.Data.SqlTypes;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Net.Mail;
+using System.Web;
+using System.Web.UI;
+using System.Web.UI.WebControls;
+
+public partial class viewCfoScrapNote : System.Web.UI.Page
+{
+    protected void Page_Load(object sender, EventArgs e)
+    {
+        this.Page.MaintainScrollPositionOnPostBack = true;
+        if (!Page.IsPostBack)
+        {
+            if (Session["sid"] != null)
+                hdnsid.Value = Session["sid"].ToString();
+            else
+                Response.Redirect("~/csscrapnotes.aspx");
+            Reset();
+        }
+        if (!System.Web.HttpContext.Current.User.Identity.IsAuthenticated)
+            Response.Redirect("~/logon.aspx");
+
+        if (Session["uid"] == null || Session["userEmail"] == null || Session["FullName"] == null)
+            Response.Redirect("~/logon.aspx");
+        else
+            hdnuid.Value = Session["uid"].ToString();
+    }
+
+    private void Reset()
+    {
+        lblMessage.Text = string.Empty;
+        drpCategory.SelectedIndex = -1;
+        grd.Visible = false;
+        ScroolDiv.Visible = false;
+        tblSingle.Visible = false;
+        bindData();
+        bindComment();
+    }
+
+    private void bindComment()
+    {
+        try
+        {
+            using (SqlConnection oSqlConnection = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+            {
+                using (SqlCommand oSqlCommand = new SqlCommand("select * from [tblflow] where cfoComment is not null and sid = " + hdnsid.Value, oSqlConnection))
+                {
+                    oSqlConnection.Open();
+                    SqlDataReader oSqlDataReader = oSqlCommand.ExecuteReader();
+                    if (oSqlDataReader.HasRows)
+                    {
+                        while (oSqlDataReader.Read())
+                        {
+                            txtCFORemark.Text = oSqlDataReader["cfoComment"].ToString();
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception oException)
+        {
+            lblMessage.ForeColor = Color.Red;
+            lblMessage.Text = "Exception Occurred : " + oException.Message.ToString();
+        }
+    }
+
+    private void bindData()
+    {
+        try
+        {
+            using (SqlConnection oSqlConnection = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+            {
+                using (SqlCommand oSqlCommand = new SqlCommand("select * from [tblScrapNote] where sid = " + hdnsid.Value, oSqlConnection))
+                {
+                    oSqlConnection.Open();
+                    SqlDataReader oSqlDataReader = oSqlCommand.ExecuteReader();
+                    if (oSqlDataReader.HasRows)
+                    {
+                        while (oSqlDataReader.Read())
+                        {
+                            hdnStatus.Value = oSqlDataReader["status"].ToString();
+                            lblSrNo.Text = oSqlDataReader["scrapnoteno"].ToString();
+                            lblStatus.Text = oSqlDataReader["statusText"].ToString();
+                            drpCategory.DataBind();
+                            if (drpCategory.Items.FindByText(oSqlDataReader["category"].ToString()) != null)
+                                drpCategory.Items.FindByText(oSqlDataReader["category"].ToString()).Selected = true;
+                            txtDate.Text = Convert.ToDateTime(oSqlDataReader["cod"]).ToString("dd/MM/yyyy", System.Globalization.CultureInfo.InvariantCulture);
+
+                            string vStatusText = oSqlDataReader["statustext"].ToString();
+                            if (vStatusText.ToLower().Contains("rejected"))
+                                lblStatus.ForeColor = Color.Red;
+                            else if (vStatusText.ToLower().Contains("pending"))
+                                lblStatus.ForeColor = Color.Orange;
+                            else if (vStatusText.ToLower().Contains("approved"))
+                                lblStatus.ForeColor = Color.Green;
+                            else if (vStatusText.ToLower().Contains("closed"))
+                                lblStatus.ForeColor = Color.Green;
+                            else
+                                lblStatus.ForeColor = Color.Orange;
+
+                            if (oSqlDataReader["status"].ToString().Equals("3"))
+                            {
+                                btnReject.Visible = true;
+                                btnSubmit.Visible = true;
+                            }
+                            else
+                            {
+                                btnReject.Visible = false;
+                                btnSubmit.Visible = false;
+                            }
+                        }
+                    }
+                }
+            }
+            ScroolDiv.Visible = true;
+            grd.DataBind();
+            grd.Visible = true;
+            grdAnnex.DataBind();
+            grdAnnex.Visible = true;
+        }
+        catch (Exception oException)
+        {
+            lblMessage.ForeColor = Color.Red;
+            lblMessage.Text = "Exception Occurred : " + oException.Message.ToString();
+        }
+    }
+
+    protected void Back_Click(object sender, EventArgs e)
+    {
+        Response.Redirect("~/scrapnotes.aspx");
+    }
+
+    protected void grd_RowCommand(object sender, GridViewCommandEventArgs e)
+    {
+        if (e.CommandName.Equals("eEdit"))
+        {
+            ScroolDiv.Visible = false;
+            tblSingle.Visible = true;
+            hdnsntid.Value = e.CommandArgument.ToString();
+            bindSingleRecordData();
+            btnSaveClose.Visible = true;
+        }
+        else if (e.CommandName.Equals("eView"))
+        {
+            ScroolDiv.Visible = false;
+            tblSingle.Visible = true;
+            hdnsntid.Value = e.CommandArgument.ToString();
+            bindSingleRecordData();
+            btnPrevious.Visible = false;
+            btnNext.Visible = false;
+            btnSaveClose.Visible = false;
+        }
+    }
+
+    protected void btnSaveClose_Click(object sender, EventArgs e)
+    {
+        updateSingleRecordData();
+        grd.DataBind();
+        ScroolDiv.Visible = true;
+        tblSingle.Visible = false;
+    }
+
+    private void updateSingleRecordData()
+    {
+        try
+        {
+            using (SqlConnection oSqlConnection = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+            {
+                string sqlSelect = "UPDATE tblScrapNoteTrans ";
+                sqlSelect = sqlSelect + "SET [ChargeReversalInputTaxCredit] = '" + txtChargeReversalInputTaxCredit1.Text + "'";
+                sqlSelect = sqlSelect + " where [sntid] = " + hdnsntid.Value;
+
+                using (SqlCommand oSqlCommand = new SqlCommand(sqlSelect, oSqlConnection))
+                {
+                    oSqlConnection.Open();
+                    oSqlCommand.ExecuteNonQuery();
+                }
+            }
+        }
+        catch (Exception oException)
+        {
+            lblMessage.ForeColor = Color.Red;
+            lblMessage.Text = "Exception Occurred : " + oException.Message.ToString();
+        }
+    }
+
+    private void bindSingleRecordData()
+    {
+        try
+        {
+            using (SqlConnection oSqlConnection = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+            {
+                string sqlSelect = "SELECT * from tblScrapNoteTrans where sid = " + hdnsid.Value + " and [sntid] = " + hdnsntid.Value;
+                using (SqlCommand oSqlCommand = new SqlCommand(sqlSelect, oSqlConnection))
+                {
+                    oSqlConnection.Open();
+                    SqlDataReader oSqlDataReader = oSqlCommand.ExecuteReader();
+                    if (oSqlDataReader.HasRows)
+                    {
+                        while (oSqlDataReader.Read())
+                        {
+                            txtMaterial1.Text = oSqlDataReader["Material"].ToString();
+                            txtShortText1.Text = oSqlDataReader["ShortText"].ToString();
+                            txtDept1.Text = oSqlDataReader["Dept"].ToString();
+                            txtTotQtyStk1.Text = oSqlDataReader["TotQtyInStk"].ToString();
+                            txtQtytoBeScrap1.Text = oSqlDataReader["QtyToBeScrap"].ToString();
+                            txtUOM1.Text = oSqlDataReader["UOM"].ToString();
+                            txtScapQtyStockValue1.Text = oSqlDataReader["ScapQtyStockValue"].ToString();
+                            txtGrnNo1.Text = oSqlDataReader["GrnNo"].ToString();
+                            txtGrnDate1.Text = oSqlDataReader["GrnDate"].ToString();
+                            txtNoOfDaysInStock1.Text = oSqlDataReader["NoOfDaysInStock"].ToString();
+                            txtRemarks1.Text = oSqlDataReader["Remarks"].ToString();
+                            txtRateUnitINR1.Text = oSqlDataReader["RateUnitINR"].ToString();
+                            txtQtyProvision1.Text = oSqlDataReader["QtyProvision"].ToString();
+                            txtProvision1.Text = oSqlDataReader["Provision"].ToString();
+                            txtTotalProAmt1.Text = oSqlDataReader["TotalProAmt"].ToString();
+                            txtProvisionWriteOff1.Text = oSqlDataReader["ProvisionWriteOff"].ToString();
+                            txtChargeWriteback1.Text = oSqlDataReader["ChargeWriteback"].ToString();
+                            txtProvisionRemarks1.Text = oSqlDataReader["ProvisionRemarks"].ToString();
+                            txtChargeReversalInputTaxCredit1.Text = oSqlDataReader["ChargeReversalInputTaxCredit"].ToString();
+                            rdoIsImported1.SelectedIndex = -1;
+                            if (oSqlDataReader["isimport"] != null)
+                            {
+                                if (rdoIsImported1.Items.FindByValue(oSqlDataReader["isimport"].ToString()) != null)
+                                    rdoIsImported1.Items.FindByValue(oSqlDataReader["isimport"].ToString()).Selected = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            vExists(hdnsntid.Value, "btnN");
+            vExists(hdnsntid.Value, "btnP");
+        }
+        catch (Exception oException)
+        {
+            lblMessage.ForeColor = Color.Red;
+            lblMessage.Text = "Exception Occurred : " + oException.Message.ToString();
+        }
+    }
+
+    protected void txtSearchMaterial_TextChanged(object sender, EventArgs e) { LoadGrid(sender); }
+
+    public void LoadGrid(object sender)
+    {
+        TextBox cSend = (TextBox)sender;
+        TextBox txtSearchMaterial = (TextBox)grd.HeaderRow.FindControl("txtSearchMaterial");
+        string oSqlSearch = "SELECT * FROM [tblScrapNoteTrans] where sid = " + hdnsid.Value + " and [Material] like '%" + txtSearchMaterial.Text + "%' order by [SrNo]";
+        SqlDataSrcSn.SelectCommand = oSqlSearch;
+        grd.DataBind();
+    }
+
+    protected void btnCancel_Click(object sender, EventArgs e)
+    {
+        grd.DataBind();
+        ScroolDiv.Visible = true;
+        tblSingle.Visible = false;
+    }
+
+    protected void btnNext_Click(object sender, EventArgs e)
+    {
+        updateSingleRecordData();
+        hdnsntid.Value = Convert.ToString(Convert.ToInt64(hdnsntid.Value) + 1);
+        bindSingleRecordData();
+    }
+
+    protected void btnPrevious_Click(object sender, EventArgs e)
+    {
+        updateSingleRecordData();
+        hdnsntid.Value = Convert.ToString(Convert.ToInt64(hdnsntid.Value) - 1);
+        bindSingleRecordData();
+    }
+
+    private void vExists(string sntid, string btn)
+    {
+        try
+        {
+            Int64 vSntid = Convert.ToInt64(sntid);
+            if (btn.Equals("btnN"))
+            { vSntid++; }
+            else if (btn.Equals("btnP"))
+            { vSntid--; }
+            using (SqlConnection oSqlConnection = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+            {
+                using (SqlCommand oSqlCommand = new SqlCommand("select count(*) from tblScrapNoteTrans where sntid = " + vSntid, oSqlConnection))
+                {
+                    oSqlConnection.Open();
+                    int vCount = Convert.ToInt16(oSqlCommand.ExecuteScalar());
+                    if (btn.Equals("btnN"))
+                    {
+                        if (vCount > 0)
+                            btnNext.Visible = true;
+                        else
+                            btnNext.Visible = false;
+                    }
+                    else if (btn.Equals("btnP"))
+                    {
+                        if (vCount > 0)
+                            btnPrevious.Visible = true;
+                        else
+                            btnPrevious.Visible = false;
+                    }
+                }
+            }
+        }
+        catch (Exception oException)
+        {
+            lblMessage.ForeColor = Color.Red;
+            lblMessage.Text = "Exception Occurred : " + oException.Message.ToString();
+        }
+    }
+
+    protected void btnSubmit_Click(object sender, EventArgs e)
+    {
+        lblMessage.Text = string.Empty;
+        if (Page.IsValid)
+        {
+            SqlTransaction oSqlTransaction = null;
+            try
+            {
+                using (SqlConnection oSqlConnection = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+                {
+                    oSqlConnection.Open();
+                    oSqlTransaction = oSqlConnection.BeginTransaction();
+
+                    string sqlInsert = string.Empty;
+                    sqlInsert = sqlInsert + "UPDATE [tblScrapNote] SET  status = 4, statusText = 'Pending at Warehouse' WHERE sid = " + hdnsid.Value.ToString();
+
+                    using (SqlCommand oSqlScrapNoteCommand = new SqlCommand(sqlInsert, oSqlConnection, oSqlTransaction))
+                    {
+                        oSqlScrapNoteCommand.ExecuteNonQuery();
+                    }
+
+                    foreach (GridViewRow oGridViewRow in grd.Rows)
+                    {
+                        TextBox txtChargeReversalInputTaxCredit = (TextBox)oGridViewRow.FindControl("txtChargeReversalInputTaxCredit");
+                        HiddenField hdnsntid1 = (HiddenField)oGridViewRow.FindControl("hdnsntid1");
+
+                        string sqlUpdate = "UPDATE tblScrapNoteTrans ";
+                        sqlUpdate = sqlUpdate + "SET [ChargeReversalInputTaxCredit] = '" + txtChargeReversalInputTaxCredit.Text + "' ";
+                        sqlUpdate = sqlUpdate + " where [sntid] = " + hdnsntid1.Value;
+
+                        using (SqlCommand oSqlCommandSnTrans = new SqlCommand(sqlUpdate, oSqlConnection, oSqlTransaction))
+                        {
+                            oSqlCommandSnTrans.ExecuteNonQuery();
+                        }
+                    }
+
+                    sqlInsert = "INSERT INTO [tblflow] ([sid] ,[addedBy] ,[status], [statusText], [cfoComment])";
+                    sqlInsert = sqlInsert + "values (" + hdnsid.Value + ", '" + hdnuid.Value.ToString() + "', 4, 'Pending at Warehouse', '" + txtCFORemark.Text + "');";
+                    using (SqlCommand oSqlFlowCommand = new SqlCommand(sqlInsert, oSqlConnection, oSqlTransaction))
+                    {
+                        oSqlFlowCommand.ExecuteNonQuery();
+                        oSqlTransaction.Commit();
+                    }
+                    bindData();
+                    lblMessage.ForeColor = Color.Green;
+                    lblMessage.Text = "Scrap Note Accepted & Submitted Successfully !!";
+                }
+            }
+            catch (Exception oException)
+            {
+                oSqlTransaction.Rollback();
+                lblMessage.ForeColor = Color.Red;
+                lblMessage.Text = "Exception Occurred : " + oException.Message.ToString();
+            }
+        }
+    }
+
+    protected void btnReject_Click(object sender, EventArgs e)
+    {
+        lblMessage.Text = string.Empty;
+        if (Page.IsValid)
+        {
+            SqlTransaction oSqlTransaction = null;
+            try
+            {
+                using (SqlConnection oSqlConnection = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+                {
+                    oSqlConnection.Open();
+                    oSqlTransaction = oSqlConnection.BeginTransaction();
+
+                    string sqlInsert = string.Empty;
+                    sqlInsert = sqlInsert + "UPDATE [tblScrapNote] SET status = 13, statusText = 'Rejected at CFO' WHERE sid = " + hdnsid.Value.ToString();
+
+                    using (SqlCommand oSqlScrapNoteCommand = new SqlCommand(sqlInsert, oSqlConnection, oSqlTransaction))
+                    {
+                        oSqlScrapNoteCommand.ExecuteNonQuery();
+                    }
+                    sqlInsert = "INSERT INTO [tblflow] ([sid] ,[addedBy] ,[status], [statusText], [cfoComment])";
+                    sqlInsert = sqlInsert + "values (" + hdnsid.Value + ", '" + hdnuid.Value.ToString() + "', 13, 'Rejected at CFO', '" + txtCFORemark.Text + "');";
+                    using (SqlCommand oSqlFlowCommand = new SqlCommand(sqlInsert, oSqlConnection, oSqlTransaction))
+                    {
+                        oSqlFlowCommand.ExecuteNonQuery();
+                        oSqlTransaction.Commit();
+                    }
+                    bindData();
+                    lblMessage.ForeColor = Color.Red;
+                    lblMessage.Text = "Scrap Note Rejected Successfully !!";
+                }
+            }
+            catch (Exception oException)
+            {
+                oSqlTransaction.Rollback();
+                lblMessage.ForeColor = Color.Red;
+                lblMessage.Text = "Exception Occurred : " + oException.Message.ToString();
+            }
+        }
+    }
+
+    protected void grd_RowDataBound(object sender, GridViewRowEventArgs e)
+    {
+        if (e.Row.RowType == DataControlRowType.DataRow)
+        {
+            ImageButton lnkEdit = (ImageButton)e.Row.FindControl("lnkEdit");
+            if (hdnStatus.Value.Equals("2"))
+                lnkEdit.Visible = true;
+            else
+                lnkEdit.Visible = false;
+        }
+    }
+}
