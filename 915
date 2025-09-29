@@ -258,3 +258,54 @@ namespace Assembly3DCamera
         }
     }
 }
+
+
+
+
+
+protected void btnClose_Click(object sender, EventArgs e)
+{
+    lblMessage.Text = string.Empty;
+    if (Page.IsValid)
+    {
+        SqlTransaction oSqlTransaction = null;
+        try
+        {
+            using (SqlConnection oSqlConnection = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+            {
+                oSqlConnection.Open();
+                oSqlTransaction = oSqlConnection.BeginTransaction();
+
+                // 1) Update ScrapNote
+                string sqlUpdate = "UPDATE [tblScrapNote] SET status = 21, statusText = 'Scrap Note Closed at Warehouse' WHERE sid = " + hdnsid.Value;
+                using (SqlCommand oSqlScrapNoteCommand = new SqlCommand(sqlUpdate, oSqlConnection, oSqlTransaction))
+                {
+                    oSqlScrapNoteCommand.ExecuteNonQuery();
+                }
+
+                // 2) Insert into tblflow
+                string sqlInsert = "INSERT INTO [tblflow] ([sid],[addedBy],[status],[statusText],[warehouseComment]) " +
+                                   "VALUES (" + hdnsid.Value + ", '" + hdnuid.Value.ToString() + "', 21, 'Scrap Note Closed at Warehouse', '" + txtWHRemark.Text + "')";
+                using (SqlCommand oSqlFlowCommand = new SqlCommand(sqlInsert, oSqlConnection, oSqlTransaction))
+                {
+                    oSqlFlowCommand.ExecuteNonQuery();
+                }
+
+                // ✅ 3) Commit once, after both succeed
+                oSqlTransaction.Commit();
+
+                bindData();
+                lblMessage.ForeColor = System.Drawing.Color.Green;
+                lblMessage.Text = "Scrap Note Closed Successfully !!";
+            }
+        }
+        catch (Exception oException)
+        {
+            if (oSqlTransaction != null)
+                oSqlTransaction.Rollback();
+
+            lblMessage.ForeColor = System.Drawing.Color.Red;
+            lblMessage.Text = "Exception Occurred : " + oException.Message.ToString();
+        }
+    }
+}
