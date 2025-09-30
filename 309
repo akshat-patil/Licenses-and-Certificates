@@ -1,0 +1,147 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using ClosedXML.Excel;
+
+namespace Assembly3DCamera
+{
+    public static class CsvCombiner
+    {
+        public static void CombineYesterdayByLot(string baseCsvPath)
+        {
+            DateTime yesterday = DateTime.Now.AddDays(-1);
+            string folderPath = Path.Combine(
+                baseCsvPath,
+                yesterday.ToString("yyyy"),
+                yesterday.ToString("MM"),
+                yesterday.ToString("dd")
+            );
+
+            if (!Directory.Exists(folderPath))
+            {
+                Console.WriteLine($"[{DateTime.Now}] Yesterday folder not found: {folderPath}");
+                return;
+            }
+
+            string outputFileName = yesterday.ToString("ddMMyyyy") + ".csv";
+            string combinedFile = Path.Combine(folderPath, outputFileName);
+
+            if (File.Exists(Path.ChangeExtension(combinedFile, ".xlsx")))
+            {
+                Console.WriteLine($"[{DateTime.Now}] Excel already exists for yesterday, skipping combine.");
+                return;
+            }
+
+            var csvFiles = Directory.GetFiles(folderPath, "*.csv")
+                                    .Where(f => !f.EndsWith(outputFileName))
+                                    .ToList();
+
+            if (csvFiles.Count == 0)
+            {
+                Console.WriteLine($"[{DateTime.Now}] No CSV files to combine in {folderPath}");
+                return;
+            }
+
+            List<string> headers = null;
+            var rows = new List<string[]>();
+
+            foreach (var file in csvFiles)
+            {
+                var lines = File.ReadAllLines(file);
+                if (lines.Length == 0) continue;
+
+                var fileHeaders = lines[0].Split(',');
+                if (headers == null)
+                {
+                    headers = fileHeaders.ToList();
+                }
+
+                for (int i = 1; i < lines.Length; i++)
+                {
+                    if (string.IsNullOrWhiteSpace(lines[i])) continue;
+                    rows.Add(lines[i].Split(','));
+                }
+            }
+
+            if (headers == null || rows.Count == 0)
+            {
+                Console.WriteLine($"[{DateTime.Now}] No valid rows found in {folderPath}");
+                return;
+            }
+
+            int lotIndex = headers.IndexOf("LOT");
+            if (lotIndex == -1)
+            {
+                Console.WriteLine($"[{DateTime.Now}] LOT column not found, cannot combine.");
+                return;
+            }
+
+            var sortedRows = rows.OrderBy(r => r[lotIndex]).ToList();
+
+            // Step 1: Create combined CSV
+            using (var writer = new StreamWriter(combinedFile))
+            {
+                writer.WriteLine(string.Join(",", headers));
+                foreach (var row in sortedRows)
+                {
+                    writer.WriteLine(string.Join(",", row));
+                }
+            }
+
+            Console.WriteLine($"[{DateTime.Now}] Combined CSV created: {combinedFile}");
+
+            // Step 2: Convert combined CSV to Excel
+            string excelFile = Path.ChangeExtension(combinedFile, ".xlsx");
+            try
+            {
+                using (var workbook = new XLWorkbook())
+                {
+                    var worksheet = workbook.Worksheets.Add("Data");
+                    // Write headers
+                    for (int i = 0; i < headers.Count; i++)
+                        worksheet.Cell(1, i + 1).Value = headers[i];
+                    // Write rows
+                    for (int r = 0; r < sortedRows.Count; r++)
+                    {
+                        var row = sortedRows[r];
+                        for (int c = 0; c < row.Length; c++)
+                            worksheet.Cell(r + 2, c + 1).Value = row[c];
+                    }
+                    workbook.SaveAs(excelFile);
+                }
+                Console.WriteLine($"[{DateTime.Now}] Excel file created: {excelFile}");
+            }
+            catch (Exception exExcel)
+            {
+                Console.WriteLine($"[{DateTime.Now}] Failed to create Excel file: {exExcel.Message}");
+                return; // Don’t delete CSVs if Excel export failed
+            }
+
+            // Step 3: Delete separate CSV files
+            foreach (var file in csvFiles)
+            {
+                try
+                {
+                    File.Delete(file);
+                    Console.WriteLine($"[{DateTime.Now}] Deleted file: {file}");
+                }
+                catch (Exception exDel)
+                {
+                    Console.WriteLine($"[{DateTime.Now}] Could not delete {file}: {exDel.Message}");
+                }
+            }
+
+            // Step 4: Delete the combined CSV after Excel creation
+            try
+            {
+                File.Delete(combinedFile);
+                Console.WriteLine($"[{DateTime.Now}] Deleted combined CSV: {combinedFile}");
+            }
+            catch (Exception exDel)
+            {
+                Console.WriteLine($"[{DateTime.Now}] Could not delete combined CSV: {exDel.Message}");
+            }
+        }
+    }
+}
