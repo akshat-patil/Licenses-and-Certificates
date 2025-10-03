@@ -98,3 +98,60 @@ protected void btnReset_Click1(object sender, EventArgs e)
     Response.Redirect(url);
 }
 
+
+
+
+
+protected void Page_Load(object sender, EventArgs e)
+{
+    if (!Page.IsPostBack)
+    {
+        int pageIndex = 0;
+
+        // restore filters from querystring (if coming back from ViewReport)
+        if (Request.QueryString.Count > 0)
+        {
+            if (!string.IsNullOrEmpty(Request.QueryString["txtName"]))
+                txtName.Text = Request.QueryString["txtName"];
+
+            if (!string.IsNullOrEmpty(Request.QueryString["txtRollNo"]))
+                txtRollNo.Text = Request.QueryString["txtRollNo"];
+
+            if (!string.IsNullOrEmpty(Request.QueryString["txtDepartment"]))
+                txtDepartment.Text = Request.QueryString["txtDepartment"];
+
+            if (!string.IsNullOrEmpty(Request.QueryString["drpCft"]))
+                drpCft.SelectedValue = Request.QueryString["drpCft"];
+
+            if (!string.IsNullOrEmpty(Request.QueryString["drpPiller"]))
+                drpPiller.SelectedValue = Request.QueryString["drpPiller"];
+
+            if (!string.IsNullOrEmpty(Request.QueryString["drpPillerName"]))
+                drpPillerName.SelectedValue = Request.QueryString["drpPillerName"];
+
+            if (!string.IsNullOrEmpty(Request.QueryString["drpCircle"]))
+                drpCircle.SelectedValue = Request.QueryString["drpCircle"];
+
+            if (!string.IsNullOrEmpty(Request.QueryString["drpStatus"]))
+                drpStatus.SelectedValue = Request.QueryString["drpStatus"];
+
+            // restore page index from query
+            if (!string.IsNullOrEmpty(Request.QueryString["page"]))
+                int.TryParse(Request.QueryString["page"], out pageIndex);
+
+            // set grid to the right page BEFORE binding
+            grd.PageIndex = pageIndex;
+
+            // now reapply filters
+            btnSubmit_Click(null, null);
+        }
+        else
+        {
+            Session["oSql"] = null;
+            bindGrid();
+
+            if (Session["PageIndex"] != null)
+                grd.PageIndex = (int)Session["PageIndex"];
+        }
+    }
+}
