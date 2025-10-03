@@ -155,3 +155,56 @@ protected void Page_Load(object sender, EventArgs e)
         }
     }
 }
+
+
+
+
+
+
+protected void Page_Load(object sender, EventArgs e)
+{
+    if (!Page.IsPostBack)
+    {
+        if (Request.QueryString.Count > 0)
+        {
+            // restore filters
+            if (!string.IsNullOrEmpty(Request.QueryString["txtName"]))
+                txtName.Text = Request.QueryString["txtName"];
+            if (!string.IsNullOrEmpty(Request.QueryString["txtRollNo"]))
+                txtRollNo.Text = Request.QueryString["txtRollNo"];
+            if (!string.IsNullOrEmpty(Request.QueryString["txtDepartment"]))
+                txtDepartment.Text = Request.QueryString["txtDepartment"];
+            if (!string.IsNullOrEmpty(Request.QueryString["drpCft"]))
+                drpCft.SelectedValue = Request.QueryString["drpCft"];
+            if (!string.IsNullOrEmpty(Request.QueryString["drpPiller"]))
+                drpPiller.SelectedValue = Request.QueryString["drpPiller"];
+            if (!string.IsNullOrEmpty(Request.QueryString["drpPillerName"]))
+                drpPillerName.SelectedValue = Request.QueryString["drpPillerName"];
+            if (!string.IsNullOrEmpty(Request.QueryString["drpCircle"]))
+                drpCircle.SelectedValue = Request.QueryString["drpCircle"];
+            if (!string.IsNullOrEmpty(Request.QueryString["drpStatus"]))
+                drpStatus.SelectedValue = Request.QueryString["drpStatus"];
+
+            // restore page index
+            int pageIndex = 0;
+            if (!string.IsNullOrEmpty(Request.QueryString["page"]))
+                int.TryParse(Request.QueryString["page"], out pageIndex);
+
+            // now reapply filters (exact same logic as Search button)
+            btnSubmit_Click(null, null);
+
+            // move to correct page AFTER data is bound
+            if (pageIndex >= 0 && pageIndex < grd.PageCount)
+                grd.PageIndex = pageIndex;
+
+            // rebind grid again to apply page index
+            grd.DataBind();
+        }
+        else
+        {
+            // no filters - default behavior
+            Session["oSql"] = null;
+            bindGrid();
+        }
+    }
+}
