@@ -1,0 +1,100 @@
+protected void grd_RowCommand(object sender, GridViewCommandEventArgs e)
+{
+    if (e.CommandName.Equals("eSelect"))
+    {
+        Session["id"] = e.CommandArgument.ToString();
+
+        // collect active filter state + page
+        var query = HttpUtility.ParseQueryString(string.Empty);
+        query["id"] = e.CommandArgument.ToString();
+
+        // preserve page index
+        if (Session["PageIndex"] != null)
+            query["page"] = Session["PageIndex"].ToString();
+
+        // preserve filters
+        if (!string.IsNullOrEmpty(txtName.Text)) query["txtName"] = txtName.Text;
+        if (!string.IsNullOrEmpty(txtRollNo.Text)) query["txtRollNo"] = txtRollNo.Text;
+        if (!string.IsNullOrEmpty(txtDepartment.Text)) query["txtDepartment"] = txtDepartment.Text;
+        if (drpCft.SelectedIndex > 0) query["drpCft"] = drpCft.SelectedValue;
+        if (drpPiller.SelectedIndex > 0) query["drpPiller"] = drpPiller.SelectedValue;
+        if (drpPillerName.SelectedIndex > 0) query["drpPillerName"] = drpPillerName.SelectedValue;
+        if (drpCircle.SelectedIndex > 0) query["drpCircle"] = drpCircle.SelectedValue;
+        if (drpStatus.SelectedIndex > 0) query["drpStatus"] = drpStatus.SelectedValue;
+
+        Response.Redirect("~/ViewReport.aspx?" + query.ToString());
+    }
+}
+
+
+
+
+
+
+
+if (!Page.IsPostBack)
+{
+    // restore filters from querystring (if coming back from ViewReport)
+    if (Request.QueryString.Count > 0)
+    {
+        if (!string.IsNullOrEmpty(Request.QueryString["txtName"]))
+            txtName.Text = Request.QueryString["txtName"];
+
+        if (!string.IsNullOrEmpty(Request.QueryString["txtRollNo"]))
+            txtRollNo.Text = Request.QueryString["txtRollNo"];
+
+        if (!string.IsNullOrEmpty(Request.QueryString["txtDepartment"]))
+            txtDepartment.Text = Request.QueryString["txtDepartment"];
+
+        if (!string.IsNullOrEmpty(Request.QueryString["drpCft"]))
+            drpCft.SelectedValue = Request.QueryString["drpCft"];
+
+        if (!string.IsNullOrEmpty(Request.QueryString["drpPiller"]))
+            drpPiller.SelectedValue = Request.QueryString["drpPiller"];
+
+        if (!string.IsNullOrEmpty(Request.QueryString["drpPillerName"]))
+            drpPillerName.SelectedValue = Request.QueryString["drpPillerName"];
+
+        if (!string.IsNullOrEmpty(Request.QueryString["drpCircle"]))
+            drpCircle.SelectedValue = Request.QueryString["drpCircle"];
+
+        if (!string.IsNullOrEmpty(Request.QueryString["drpStatus"]))
+            drpStatus.SelectedValue = Request.QueryString["drpStatus"];
+
+        // restore page index
+        if (!string.IsNullOrEmpty(Request.QueryString["page"]))
+            Session["PageIndex"] = int.Parse(Request.QueryString["page"]);
+
+        // now reapply filters
+        btnSubmit_Click(null, null);
+    }
+    else
+    {
+        Session["oSql"] = null;
+        bindGrid();
+        if (Session["PageIndex"] != null)
+            grd_PageIndexChanging(grd, new GridViewPageEventArgs((int)Session["PageIndex"]));
+    }
+}
+
+
+
+
+
+
+
+
+
+protected void btnReset_Click1(object sender, EventArgs e)
+{
+    // take current query, drop the "id" param, go back with the rest
+    var query = HttpUtility.ParseQueryString(Request.Url.Query);
+    query.Remove("id");
+
+    string url = "~/Reports.aspx";
+    if (query.Count > 0)
+        url += "?" + query.ToString();
+
+    Response.Redirect(url);
+}
+
