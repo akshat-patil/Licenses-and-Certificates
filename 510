@@ -1,0 +1,62 @@
+<hr />
+<h3>Status Report</h3>
+
+<asp:GridView ID="gvStatusReport" runat="server" AutoGenerateColumns="False" CssClass="table table-bordered"
+    HeaderStyle-BackColor="#007bff" HeaderStyle-ForeColor="White">
+    <Columns>
+        <asp:TemplateField HeaderText="Sr. No.">
+            <ItemTemplate><%# Container.DataItemIndex + 1 %></ItemTemplate>
+        </asp:TemplateField>
+
+        <asp:BoundField DataField="csComment" HeaderText="CS Comment" />
+        <asp:BoundField DataField="controllingComment" HeaderText="Controlling Comment" />
+        <asp:BoundField DataField="taxationComment" HeaderText="Taxation Comment" />
+        <asp:BoundField DataField="cooComment" HeaderText="COO Comment" />
+        <asp:BoundField DataField="cfoComment" HeaderText="CFO Comment" />
+        <asp:BoundField DataField="warehouseComment" HeaderText="Warehouse Comment" />
+        <asp:BoundField DataField="babuComment" HeaderText="BA/BU Comment" />
+        <asp:BoundField DataField="bgcfoComment" HeaderText="BG/CFO Comment" />
+        <asp:BoundField DataField="bgceoComment" HeaderText="BG/CEO Comment" />
+        <asp:BoundField DataField="envComment" HeaderText="Environment Comment" />
+    </Columns>
+</asp:GridView>
+
+
+
+
+private void BindStatusReport()
+{
+    try
+    {
+        using (SqlConnection conn = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            conn.Open();
+            string query = @"SELECT 
+                                csComment, controllingComment, taxationComment, cooComment, cfoComment, 
+                                warehouseComment, babuComment, bgcfoComment, bgceoComment, envComment
+                             FROM tblflow
+                             WHERE sid = " + hdnsid.Value + @"
+                             ORDER BY fid ASC";
+
+            using (SqlDataAdapter da = new SqlDataAdapter(query, conn))
+            {
+                DataTable dt = new DataTable();
+                da.Fill(dt);
+                gvStatusReport.DataSource = dt;
+                gvStatusReport.DataBind();
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Error loading status report: " + ex.Message;
+    }
+}
+
+
+
+BindStatusReport();
+
+
+BindStatusReport();
