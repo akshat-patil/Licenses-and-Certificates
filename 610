@@ -181,3 +181,79 @@ namespace PdfToExcelApp.Controllers
   },
   "AllowedHosts": "*"
 }
+
+
+
+
+
+
+
+using Microsoft.AspNetCore.Mvc;
+using System.IO;
+using Syncfusion.XlsIO;
+using System.Threading.Tasks;
+
+// 👇 Add aliases to fix class conflicts
+using PdfDoc = Syncfusion.Pdf.Parsing;
+using OcrLib = Syncfusion.OCRProcessor;
+
+namespace PdfToExcelApp.Controllers
+{
+    public class PdfController : Controller
+    {
+        [HttpGet]
+        public IActionResult Index()
+        {
+            return View();
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> Index(IFormFile pdfFile)
+        {
+            if (pdfFile == null || pdfFile.Length == 0)
+            {
+                ViewBag.Message = "Please upload a valid PDF file.";
+                return View();
+            }
+
+            string extractedText = string.Empty;
+
+            using (var stream = new MemoryStream())
+            {
+                await pdfFile.CopyToAsync(stream);
+                stream.Position = 0;
+
+                // ✅ Using aliases to avoid ambiguity
+                var loadedDocument = new PdfDoc.PdfLoadedDocument(stream);
+                var ocrProcessor = new OcrLib.OCRProcessor();
+
+                // Perform OCR
+                var result = ocrProcessor.PerformOCR(loadedDocument);
+                extractedText = result.Text;
+                loadedDocument.Close(true);
+            }
+
+            // ✅ Save results into Excel
+            using (var excelEngine = new Syncfusion.XlsIO.ExcelEngine())
+            {
+                var app = excelEngine.Excel;
+                var workbook = app.Workbooks.Create(1);
+                var sheet = workbook.Worksheets[0];
+                sheet.Range["A1"].Text = "Extracted Text";
+                sheet.Range["A2"].Text = extractedText;
+
+                using (var excelStream = new MemoryStream())
+                {
+                    workbook.SaveAs(excelStream);
+                    workbook.Close();
+                    excelStream.Position = 0;
+
+                    string fileName = "ExtractedData.xlsx";
+                    return File(excelStream.ToArray(),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        fileName);
+                }
+            }
+        }
+    }
+}
