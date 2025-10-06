@@ -1,126 +1,182 @@
-using Microsoft.AspNetCore.Mvc;
-using Syncfusion.Pdf.Parsing;
-using Syncfusion.XlsIO;
-using Syncfusion.PDF.OCR;
-using YourNamespace.Models;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Hosting;
+using Syncfusion.Licensing;
 
-namespace YourNamespace.Controllers
+namespace PdfToExcelApp
 {
-    public class PdfController : Controller
+    public class Program
     {
-        // Upload page
-        public IActionResult Upload()
+        public static void Main(string[] args)
         {
-            return View();
+            // Register Syncfusion license
+            SyncfusionLicenseProvider.RegisterLicense("YOUR_LICENSE_KEY_HERE");
+            CreateHostBuilder(args).Build().Run();
         }
 
-        [HttpPost]
-        public async Task<IActionResult> ProcessPdf(PdfUploadModel model)
-        {
-            if (model.PdfFile != null && model.PdfFile.Length > 0)
-            {
-                // Save PDF temporarily
-                var tempPdfPath = Path.Combine(Path.GetTempPath(), model.PdfFile.FileName);
-                using (var stream = new FileStream(tempPdfPath, FileMode.Create))
+        public static IHostBuilder CreateHostBuilder(string[] args) =>
+            Host.CreateDefaultBuilder(args)
+                .ConfigureWebHostDefaults(webBuilder =>
                 {
-                    await model.PdfFile.CopyToAsync(stream);
-                }
+                    webBuilder.UseStartup<Startup>();
+                });
+    }
+}
 
-                // Extract data from PDF
-                var extractedData = ExtractDataFromPdf(tempPdfPath);
 
-                // Create Excel
-                var excelPath = CreateExcelFromData(extractedData, model.PdfFile.FileName);
 
-                // Return download link
-                var fileBytes = System.IO.File.ReadAllBytes(excelPath);
-                return File(fileBytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", Path.GetFileName(excelPath));
-            }
 
-            return View("Upload");
+
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
+namespace PdfToExcelApp
+{
+    public class Startup
+    {
+        public void ConfigureServices(IServiceCollection services)
+        {
+            services.AddControllersWithViews();
         }
 
-        private List<List<string>> ExtractDataFromPdf(string pdfPath)
+        public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         {
-            List<List<string>> tableData = new List<List<string>>();
+            if (env.IsDevelopment())
+                app.UseDeveloperExceptionPage();
 
-            // Load PDF
-            PdfLoadedDocument loadedDocument = new PdfLoadedDocument(pdfPath);
-
-            foreach (var page in loadedDocument.Pages)
+            app.UseStaticFiles();
+            app.UseRouting();
+            app.UseEndpoints(endpoints =>
             {
-                // OCR Processor for scanned PDFs
-                using (OCRProcessor processor = new OCRProcessor())
-                {
-                    processor.Language = "eng";
-                    string extractedText = processor.ExtractText(page);
-
-                    // Basic parsing: split lines and words
-                    var lines = extractedText.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
-                    foreach (var line in lines)
-                    {
-                        var columns = line.Split(new[] { ' ', '\t', ',' }, StringSplitOptions.RemoveEmptyEntries);
-                        tableData.Add(new List<string>(columns));
-                    }
-                }
-            }
-
-            loadedDocument.Close(true);
-            return tableData;
-        }
-
-        private string CreateExcelFromData(List<List<string>> data, string pdfFileName)
-        {
-            var excelFileName = Path.GetFileNameWithoutExtension(pdfFileName) + ".xlsx";
-            var excelPath = Path.Combine(Path.GetTempPath(), excelFileName);
-
-            using (ExcelEngine excelEngine = new ExcelEngine())
-            {
-                IApplication application = excelEngine.Excel;
-                application.DefaultVersion = ExcelVersion.Excel2016;
-
-                IWorkbook workbook = application.Workbooks.Create(1);
-                IWorksheet sheet = workbook.Worksheets[0];
-
-                for (int row = 0; row < data.Count; row++)
-                {
-                    for (int col = 0; col < data[row].Count; col++)
-                    {
-                        sheet.Range[row + 1, col + 1].Text = data[row][col];
-                    }
-                }
-
-                workbook.SaveAs(excelPath);
-                workbook.Close();
-            }
-
-            return excelPath;
+                endpoints.MapControllerRoute(
+                    name: "default",
+                    pattern: "{controller=Pdf}/{action=Index}/{id?}");
+            });
         }
     }
 }
 
 
 
-@model YourNamespace.Models.PdfUploadModel
 
-@{
-    ViewData["Title"] = "Upload PDF";
+
+namespace PdfToExcelApp.Models
+{
+    public class PdfDataModel
+    {
+        public string? ExtractedText { get; set; }
+    }
 }
 
-<h2>Upload PDF</h2>
 
-<form asp-action="ProcessPdf" asp-controller="Pdf" enctype="multipart/form-data" method="post">
-    <input type="file" name="PdfFile" accept=".pdf" required />
-    <br /><br />
-    <input type="submit" value="Process PDF" />
+
+
+
+using Microsoft.AspNetCore.Mvc;
+using System.IO;
+using Syncfusion.XlsIO;
+using System.Threading.Tasks;
+
+namespace PdfToExcelApp.Controllers
+{
+    public class PdfController : Controller
+    {
+        [HttpGet]
+        public IActionResult Index()
+        {
+            return View();
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> Index(IFormFile pdfFile)
+        {
+            if (pdfFile == null || pdfFile.Length == 0)
+            {
+                ViewBag.Message = "Please upload a valid PDF file.";
+                return View();
+            }
+
+            string extractedText = string.Empty;
+
+            using (var stream = new MemoryStream())
+            {
+                await pdfFile.CopyToAsync(stream);
+                stream.Position = 0;
+
+                // ✅ Fully qualified class names to avoid conflicts
+                var loadedDocument = new Syncfusion.Pdf.Parsing.PdfLoadedDocument(stream);
+                var ocrProcessor = new Syncfusion.OCRProcessor.OCRProcessor();
+
+                // Optional: specify Tesseract OCR language data folder if you have it
+                // ocrProcessor.Settings.TesseractLanguage = "eng";
+                // ocrProcessor.Settings.LanguageDataPath = @"C:\tessdata\";
+
+                var result = ocrProcessor.PerformOCR(loadedDocument);
+                extractedText = result.Text;
+                loadedDocument.Close(true);
+            }
+
+            // ✅ Create Excel file
+            using (var excelEngine = new Syncfusion.XlsIO.ExcelEngine())
+            {
+                var app = excelEngine.Excel;
+                var workbook = app.Workbooks.Create(1);
+                var sheet = workbook.Worksheets[0];
+                sheet.Range["A1"].Text = "Extracted Text";
+                sheet.Range["A2"].Text = extractedText;
+
+                using (var excelStream = new MemoryStream())
+                {
+                    workbook.SaveAs(excelStream);
+                    workbook.Close();
+                    excelStream.Position = 0;
+
+                    string fileName = "ExtractedData.xlsx";
+                    return File(excelStream.ToArray(), 
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        fileName);
+                }
+            }
+        }
+    }
+}
+
+
+
+
+@{
+    ViewBag.Title = "PDF to Excel OCR";
+}
+
+<h2>PDF to Excel OCR Converter</h2>
+
+<form asp-action="Index" method="post" enctype="multipart/form-data">
+    <div>
+        <label>Select PDF File:</label>
+        <input type="file" name="pdfFile" accept=".pdf" required />
+    </div>
+    <br />
+    <button type="submit" class="btn btn-primary">Process PDF</button>
 </form>
+
+@if (ViewBag.Message != null)
+{
+    <p style="color:red">@ViewBag.Message</p>
+}
+
+
+
+
+
 
 
 {
   "Logging": {
     "LogLevel": {
       "Default": "Information",
-      "Microsoft.AspNetCore": "Warning"
+      "Microsoft": "Warning",
+      "Microsoft.Hosting.Lifetime": "Information"
     }
   },
   "AllowedHosts": "*"
