@@ -257,3 +257,9 @@ namespace PdfToExcelApp.Controllers
         }
     }
 }
+
+
+
+Install-Package Syncfusion.Pdf.Net.Core
+Install-Package Syncfusion.OCRProcessor.Net.Core
+Install-Package Syncfusion.XlsIO.Net.Core
