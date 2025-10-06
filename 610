@@ -1,0 +1,127 @@
+using Microsoft.AspNetCore.Mvc;
+using Syncfusion.Pdf.Parsing;
+using Syncfusion.XlsIO;
+using Syncfusion.PDF.OCR;
+using YourNamespace.Models;
+
+namespace YourNamespace.Controllers
+{
+    public class PdfController : Controller
+    {
+        // Upload page
+        public IActionResult Upload()
+        {
+            return View();
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> ProcessPdf(PdfUploadModel model)
+        {
+            if (model.PdfFile != null && model.PdfFile.Length > 0)
+            {
+                // Save PDF temporarily
+                var tempPdfPath = Path.Combine(Path.GetTempPath(), model.PdfFile.FileName);
+                using (var stream = new FileStream(tempPdfPath, FileMode.Create))
+                {
+                    await model.PdfFile.CopyToAsync(stream);
+                }
+
+                // Extract data from PDF
+                var extractedData = ExtractDataFromPdf(tempPdfPath);
+
+                // Create Excel
+                var excelPath = CreateExcelFromData(extractedData, model.PdfFile.FileName);
+
+                // Return download link
+                var fileBytes = System.IO.File.ReadAllBytes(excelPath);
+                return File(fileBytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", Path.GetFileName(excelPath));
+            }
+
+            return View("Upload");
+        }
+
+        private List<List<string>> ExtractDataFromPdf(string pdfPath)
+        {
+            List<List<string>> tableData = new List<List<string>>();
+
+            // Load PDF
+            PdfLoadedDocument loadedDocument = new PdfLoadedDocument(pdfPath);
+
+            foreach (var page in loadedDocument.Pages)
+            {
+                // OCR Processor for scanned PDFs
+                using (OCRProcessor processor = new OCRProcessor())
+                {
+                    processor.Language = "eng";
+                    string extractedText = processor.ExtractText(page);
+
+                    // Basic parsing: split lines and words
+                    var lines = extractedText.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (var line in lines)
+                    {
+                        var columns = line.Split(new[] { ' ', '\t', ',' }, StringSplitOptions.RemoveEmptyEntries);
+                        tableData.Add(new List<string>(columns));
+                    }
+                }
+            }
+
+            loadedDocument.Close(true);
+            return tableData;
+        }
+
+        private string CreateExcelFromData(List<List<string>> data, string pdfFileName)
+        {
+            var excelFileName = Path.GetFileNameWithoutExtension(pdfFileName) + ".xlsx";
+            var excelPath = Path.Combine(Path.GetTempPath(), excelFileName);
+
+            using (ExcelEngine excelEngine = new ExcelEngine())
+            {
+                IApplication application = excelEngine.Excel;
+                application.DefaultVersion = ExcelVersion.Excel2016;
+
+                IWorkbook workbook = application.Workbooks.Create(1);
+                IWorksheet sheet = workbook.Worksheets[0];
+
+                for (int row = 0; row < data.Count; row++)
+                {
+                    for (int col = 0; col < data[row].Count; col++)
+                    {
+                        sheet.Range[row + 1, col + 1].Text = data[row][col];
+                    }
+                }
+
+                workbook.SaveAs(excelPath);
+                workbook.Close();
+            }
+
+            return excelPath;
+        }
+    }
+}
+
+
+
+@model YourNamespace.Models.PdfUploadModel
+
+@{
+    ViewData["Title"] = "Upload PDF";
+}
+
+<h2>Upload PDF</h2>
+
+<form asp-action="ProcessPdf" asp-controller="Pdf" enctype="multipart/form-data" method="post">
+    <input type="file" name="PdfFile" accept=".pdf" required />
+    <br /><br />
+    <input type="submit" value="Process PDF" />
+</form>
+
+
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*"
+}
