@@ -1,115 +1,267 @@
-Install-Package Syncfusion.Pdf.Net.Core
-Install-Package Syncfusion.OCRProcessor
-Install-Package Syncfusion.Compression.Net.Core
-Install-Package ClosedXML
-
-
-
-using System;
-using System.IO;
-using System.Linq;
-using System.Text;
-using System.Web;
-using System.Web.Mvc;
-using ClosedXML.Excel;
-using Syncfusion.OCRProcessor;
-using Syncfusion.Pdf.Parsing;
-
-namespace PdfDataExtractor.Controllers
 {
-    public class PdfController : Controller
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "Nanonets": {
+    "ApiKey": "YOUR_API_KEY_HERE",
+    "ModelId": "YOUR_MODEL_ID_HERE"
+  }
+}
+
+
+-----
+
+
+namespace NanonetsExtractor.Models
+{
+    public class ExtractedData
     {
-        // GET: Pdf
-        public ActionResult Index()
+        public string FieldName { get; set; }
+        public string Value { get; set; }
+    }
+}
+
+
+-----
+
+
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
+using NanonetsExtractor.Models;
+using System.IO;
+using System.Net.Http.Headers;
+using System.Text;
+using ClosedXML.Excel; // (optional for Excel export)
+using System.Net.Http;
+
+namespace NanonetsExtractor.Controllers
+{
+    public class HomeController : Controller
+    {
+        private readonly string _apiKey;
+        private readonly string _modelId;
+        private readonly IWebHostEnvironment _env;
+
+        public HomeController(IConfiguration config, IWebHostEnvironment env)
+        {
+            _apiKey = config["Nanonets:ApiKey"];
+            _modelId = config["Nanonets:ModelId"];
+            _env = env;
+        }
+
+        public IActionResult Index()
         {
             return View();
         }
 
         [HttpPost]
-        public ActionResult Extract(HttpPostedFileBase file)
+        public async Task<IActionResult> UploadFile(IFormFile file)
         {
-            if (file == null || file.ContentLength == 0)
+            if (file == null || file.Length == 0)
             {
-                ViewBag.Message = "Please upload a valid PDF file.";
+                ViewBag.Message = "Please upload a valid file.";
                 return View("Index");
             }
 
-            string tempPath = Path.Combine(Path.GetTempPath(), file.FileName);
-            file.SaveAs(tempPath);
+            string uploads = Path.Combine(_env.WebRootPath, "uploads");
+            if (!Directory.Exists(uploads)) Directory.CreateDirectory(uploads);
 
-            // Load the PDF document
-            PdfLoadedDocument loadedDocument = new PdfLoadedDocument(tempPath);
-
-            // Create OCR processor instance
-            using (OCRProcessor ocrProcessor = new OCRProcessor())
+            string filePath = Path.Combine(uploads, file.FileName);
+            using (var stream = new FileStream(filePath, FileMode.Create))
             {
-                // Configure OCR settings for layout detection
-                ocrProcessor.Settings.LayoutResults = true;
-                ocrProcessor.Settings.DetectTables = true;
-                ocrProcessor.Settings.DetectParagraphs = true;
-
-                // (Optional) If you downloaded Tesseract language data files:
-                // ocrProcessor.Settings.LanguageDataPath = Server.MapPath("~/tessdata/");
-                // ocrProcessor.Settings.Language = Languages.English;
-
-                // Perform OCR and get text layout
-                var result = ocrProcessor.PerformOCR(loadedDocument);
-                var layout = ocrProcessor.GetOCRLayout(loadedDocument);
-
-                // Use StringBuilder to gather extracted text
-                StringBuilder extractedText = new StringBuilder();
-
-                foreach (var page in layout.Pages)
-                {
-                    foreach (var line in page.Lines)
-                    {
-                        foreach (var word in line.Words)
-                        {
-                            extractedText.Append(word.Text + "\t"); // tab-separated
-                        }
-                        extractedText.AppendLine();
-                    }
-                    extractedText.AppendLine();
-                }
-
-                // Save structured data to Excel using ClosedXML
-                string excelPath = Path.Combine(Path.GetTempPath(), "ExtractedData.xlsx");
-                using (var workbook = new XLWorkbook())
-                {
-                    var worksheet = workbook.Worksheets.Add("Extracted Data");
-
-                    string[] lines = extractedText.ToString().Split('\n');
-                    int row = 1;
-                    foreach (var line in lines)
-                    {
-                        if (!string.IsNullOrWhiteSpace(line))
-                        {
-                            var columns = line.Split(new[] { '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                            for (int col = 0; col < columns.Length; col++)
-                            {
-                                worksheet.Cell(row, col + 1).Value = columns[col];
-                            }
-                            row++;
-                        }
-                    }
-
-                    worksheet.Columns().AdjustToContents();
-                    workbook.SaveAs(excelPath);
-                }
-
-                loadedDocument.Close(true);
-
-                // Return Excel file as download
-                var fileBytes = System.IO.File.ReadAllBytes(excelPath);
-                return File(fileBytes,
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    "ExtractedData.xlsx");
+                await file.CopyToAsync(stream);
             }
+
+            ViewBag.FilePath = filePath;
+            ViewBag.ShowProcessButton = true;
+            return View("Index");
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> ProcessFile(string filePath)
+        {
+            var data = await ExtractDataFromNanonets(filePath);
+            TempData["ExtractedData"] = System.Text.Json.JsonSerializer.Serialize(data);
+            return RedirectToAction("EditData");
+        }
+
+        public IActionResult EditData()
+        {
+            var json = TempData["ExtractedData"] as string;
+            if (json == null) return RedirectToAction("Index");
+            var data = System.Text.Json.JsonSerializer.Deserialize<List<ExtractedData>>(json);
+            TempData.Keep("ExtractedData");
+            return View(data);
+        }
+
+        [HttpPost]
+        public IActionResult ConfirmChanges(List<ExtractedData> data)
+        {
+            TempData["FinalData"] = System.Text.Json.JsonSerializer.Serialize(data);
+            return RedirectToAction("DownloadOptions");
+        }
+
+        public IActionResult DownloadOptions() => View();
+
+        [HttpPost]
+        public IActionResult Download(string format)
+        {
+            var json = TempData["FinalData"] as string;
+            if (json == null) return RedirectToAction("Index");
+            var data = System.Text.Json.JsonSerializer.Deserialize<List<ExtractedData>>(json);
+            var fileName = $"ExtractedData_{DateTime.Now:yyyyMMddHHmmss}";
+
+            return format switch
+            {
+                "csv" => File(GenerateCsv(data), "text/csv", fileName + ".csv"),
+                "excel" => File(GenerateExcel(data), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName + ".xlsx"),
+                "pdf" => File(GeneratePdf(data), "application/pdf", fileName + ".pdf"),
+                _ => RedirectToAction("Index")
+            };
+        }
+
+        private async Task<List<ExtractedData>> ExtractDataFromNanonets(string filePath)
+        {
+            var list = new List<ExtractedData>();
+            using var client = new HttpClient();
+            var byteArray = Encoding.ASCII.GetBytes(_apiKey + ":");
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(byteArray));
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new StreamContent(System.IO.File.OpenRead(filePath)), "file", Path.GetFileName(filePath));
+
+            var res = await client.PostAsync($"https://app.nanonets.com/api/v2/OCR/Model/{_modelId}/LabelFile/", form);
+            var json = await res.Content.ReadAsStringAsync();
+
+            // Parse roughly without Newtonsoft
+            var parts = json.Split(new[] { "\"field_name\"", "\"text\"" }, StringSplitOptions.None);
+            for (int i = 1; i < parts.Length - 1; i += 2)
+            {
+                string field = ExtractValue(parts[i]);
+                string value = ExtractValue(parts[i + 1]);
+                if (!string.IsNullOrEmpty(field))
+                    list.Add(new ExtractedData { FieldName = field, Value = value });
+            }
+            return list;
+        }
+
+        private string ExtractValue(string input)
+        {
+            int start = input.IndexOf(":") + 2;
+            int end = input.IndexOf("\"", start);
+            if (start > 1 && end > start)
+                return input.Substring(start, end - start);
+            return string.Empty;
+        }
+
+        private byte[] GenerateCsv(List<ExtractedData> data)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("FieldName,Value");
+            foreach (var d in data)
+                sb.AppendLine($"{d.FieldName},{d.Value}");
+            return Encoding.UTF8.GetBytes(sb.ToString());
+        }
+
+        private byte[] GenerateExcel(List<ExtractedData> data)
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.Worksheets.Add("ExtractedData");
+            ws.Cell(1, 1).Value = "Field Name";
+            ws.Cell(1, 2).Value = "Value";
+
+            for (int i = 0; i < data.Count; i++)
+            {
+                ws.Cell(i + 2, 1).Value = data[i].FieldName;
+                ws.Cell(i + 2, 2).Value = data[i].Value;
+            }
+
+            using var ms = new MemoryStream();
+            wb.SaveAs(ms);
+            return ms.ToArray();
+        }
+
+        private byte[] GeneratePdf(List<ExtractedData> data)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Extracted Data\n\n");
+            foreach (var d in data)
+                sb.AppendLine($"{d.FieldName}: {d.Value}");
+            return Encoding.UTF8.GetBytes(sb.ToString());
         }
     }
 }
 
 
 
+------
 
-https://www.nuget.org/packages/Syncfusion.OCRProcessor/
+@{
+    ViewData["Title"] = "Upload Document";
+}
+
+<h2>Upload Document</h2>
+
+<form method="post" enctype="multipart/form-data" asp-action="UploadFile">
+    <input type="file" name="file" required />
+    <button type="submit">Upload</button>
+</form>
+
+@if (ViewBag.ShowProcessButton != null)
+{
+    <hr />
+    <form method="post" asp-action="ProcessFile">
+        <input type="hidden" name="filePath" value="@ViewBag.FilePath" />
+        <button type="submit">Process File</button>
+    </form>
+}
+
+
+
+-------
+
+
+
+@model List<NanonetsExtractor.Models.ExtractedData>
+
+<h2>Edit Extracted Data</h2>
+
+<form method="post" asp-action="ConfirmChanges">
+<table border="1" cellpadding="5">
+<tr><th>Field Name</th><th>Value</th></tr>
+@for (int i = 0; i < Model.Count; i++)
+{
+    <tr>
+        <td><input type="text" name="[@i].FieldName" value="@Model[i].FieldName" readonly /></td>
+        <td><input type="text" name="[@i].Value" value="@Model[i].Value" /></td>
+    </tr>
+}
+</table>
+<br />
+<button type="submit">Confirm Changes</button>
+</form>
+
+
+
+------
+
+
+
+<h2>Download Extracted Report</h2>
+
+<form method="post" asp-action="Download">
+    <select name="format" required>
+        <option value="pdf">PDF</option>
+        <option value="csv">CSV</option>
+        <option value="excel">Excel</option>
+    </select>
+    <button type="submit">Download</button>
+</form>
+
+
+------
