@@ -529,3 +529,164 @@ namespace NanonetsExtractor.Controllers
 </form>
 
 
+--------
+
+
+using Microsoft.AspNetCore.Mvc;
+using System.Net.Http.Headers;
+using System.Text.Json;
+
+namespace NanonetsApp.Controllers
+{
+    public class HomeController : Controller
+    {
+        private readonly IWebHostEnvironment _env;
+        private readonly string _apiKey = "YOUR_API_KEY";
+        private readonly string _modelId = "YOUR_MODEL_ID";
+
+        public HomeController(IWebHostEnvironment env)
+        {
+            _env = env;
+        }
+
+        public IActionResult Index()
+        {
+            return View();
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> Upload(IFormFile file)
+        {
+            if (file == null || file.Length == 0)
+                return Json(new { success = false, message = "No file uploaded" });
+
+            var uploads = Path.Combine(_env.WebRootPath, "uploads");
+            if (!Directory.Exists(uploads))
+                Directory.CreateDirectory(uploads);
+
+            var filePath = Path.Combine(uploads, file.FileName);
+            using (var stream = new FileStream(filePath, FileMode.Create))
+            {
+                await file.CopyToAsync(stream);
+            }
+
+            TempData["UploadedFilePath"] = filePath;
+            return Json(new { success = true });
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> ProcessFile()
+        {
+            string? filePath = TempData["UploadedFilePath"] as string;
+            if (string.IsNullOrEmpty(filePath))
+                return Json(new { success = false, message = "File not found." });
+
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Basic",
+                    Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes($"{_apiKey}:")));
+
+            var form = new MultipartFormDataContent();
+            var fileBytes = await System.IO.File.ReadAllBytesAsync(filePath);
+            form.Add(new ByteArrayContent(fileBytes), "file", Path.GetFileName(filePath));
+
+            var response = await httpClient.PostAsync($"https://app.nanonets.com/api/v2/OCR/Model/{_modelId}/LabelFile/", form);
+            var result = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+                return Json(new { success = false, message = "Processing failed." });
+
+            var json = JsonSerializer.Deserialize<JsonElement>(result);
+            return Json(new { success = true, data = json });
+        }
+    }
+}
+
+
+---------
+
+@{
+    ViewData["Title"] = "Document Processor";
+}
+
+<div style="text-align:center; margin-top:50px;">
+    <h2>Upload a Document</h2>
+
+    <input type="file" id="fileInput" class="form-control" style="width:300px; margin:auto;">
+    <button id="uploadBtn" class="btn btn-primary mt-3">Upload</button>
+
+    <div id="processDiv" style="display:none; margin-top:20px;">
+        <button id="processBtn" class="btn btn-success">Process File</button>
+    </div>
+
+    <div id="loading" style="display:none; margin-top:20px;">Processing... Please wait</div>
+
+    <div id="resultDiv" style="display:none; margin-top:20px;"></div>
+</div>
+
+<script>
+document.getElementById("uploadBtn").addEventListener("click", async () => {
+    const fileInput = document.getElementById("fileInput");
+    const file = fileInput.files[0];
+    if (!file) {
+        alert("Please select a file first.");
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const response = await fetch("/Home/Upload", { method: "POST", body: formData });
+    const result = await response.json();
+
+    if (result.success) {
+        alert("File uploaded successfully!");
+        document.getElementById("processDiv").style.display = "block";
+    } else {
+        alert(result.message);
+    }
+});
+
+document.getElementById("processBtn").addEventListener("click", async () => {
+    document.getElementById("loading").style.display = "block";
+
+    const response = await fetch("/Home/ProcessFile", { method: "POST" });
+    const result = await response.json();
+
+    document.getElementById("loading").style.display = "none";
+
+    if (result.success) {
+        document.getElementById("resultDiv").style.display = "block";
+        document.getElementById("resultDiv").innerHTML =
+            "<pre>" + JSON.stringify(result.data, null, 2) + "</pre>";
+    } else {
+        alert(result.message);
+    }
+});
+</script>
+
+
+
+------
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddControllersWithViews();
+
+var app = builder.Build();
+
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler("/Home/Error");
+}
+
+app.UseStaticFiles();
+app.UseRouting();
+app.UseAuthorization();
+
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Home}/{action=Index}/{id?}");
+
+app.Run();
+
+
