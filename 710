@@ -1,0 +1,110 @@
+Install-Package Syncfusion.Pdf.Net.Core
+Install-Package Syncfusion.OCRProcessor
+Install-Package Syncfusion.Compression.Net.Core
+Install-Package ClosedXML
+
+
+
+using System;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Web;
+using System.Web.Mvc;
+using ClosedXML.Excel;
+using Syncfusion.OCRProcessor;
+using Syncfusion.Pdf.Parsing;
+
+namespace PdfDataExtractor.Controllers
+{
+    public class PdfController : Controller
+    {
+        // GET: Pdf
+        public ActionResult Index()
+        {
+            return View();
+        }
+
+        [HttpPost]
+        public ActionResult Extract(HttpPostedFileBase file)
+        {
+            if (file == null || file.ContentLength == 0)
+            {
+                ViewBag.Message = "Please upload a valid PDF file.";
+                return View("Index");
+            }
+
+            string tempPath = Path.Combine(Path.GetTempPath(), file.FileName);
+            file.SaveAs(tempPath);
+
+            // Load the PDF document
+            PdfLoadedDocument loadedDocument = new PdfLoadedDocument(tempPath);
+
+            // Create OCR processor instance
+            using (OCRProcessor ocrProcessor = new OCRProcessor())
+            {
+                // Configure OCR settings for layout detection
+                ocrProcessor.Settings.LayoutResults = true;
+                ocrProcessor.Settings.DetectTables = true;
+                ocrProcessor.Settings.DetectParagraphs = true;
+
+                // (Optional) If you downloaded Tesseract language data files:
+                // ocrProcessor.Settings.LanguageDataPath = Server.MapPath("~/tessdata/");
+                // ocrProcessor.Settings.Language = Languages.English;
+
+                // Perform OCR and get text layout
+                var result = ocrProcessor.PerformOCR(loadedDocument);
+                var layout = ocrProcessor.GetOCRLayout(loadedDocument);
+
+                // Use StringBuilder to gather extracted text
+                StringBuilder extractedText = new StringBuilder();
+
+                foreach (var page in layout.Pages)
+                {
+                    foreach (var line in page.Lines)
+                    {
+                        foreach (var word in line.Words)
+                        {
+                            extractedText.Append(word.Text + "\t"); // tab-separated
+                        }
+                        extractedText.AppendLine();
+                    }
+                    extractedText.AppendLine();
+                }
+
+                // Save structured data to Excel using ClosedXML
+                string excelPath = Path.Combine(Path.GetTempPath(), "ExtractedData.xlsx");
+                using (var workbook = new XLWorkbook())
+                {
+                    var worksheet = workbook.Worksheets.Add("Extracted Data");
+
+                    string[] lines = extractedText.ToString().Split('\n');
+                    int row = 1;
+                    foreach (var line in lines)
+                    {
+                        if (!string.IsNullOrWhiteSpace(line))
+                        {
+                            var columns = line.Split(new[] { '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                            for (int col = 0; col < columns.Length; col++)
+                            {
+                                worksheet.Cell(row, col + 1).Value = columns[col];
+                            }
+                            row++;
+                        }
+                    }
+
+                    worksheet.Columns().AdjustToContents();
+                    workbook.SaveAs(excelPath);
+                }
+
+                loadedDocument.Close(true);
+
+                // Return Excel file as download
+                var fileBytes = System.IO.File.ReadAllBytes(excelPath);
+                return File(fileBytes,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "ExtractedData.xlsx");
+            }
+        }
+    }
+}
