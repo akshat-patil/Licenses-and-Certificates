@@ -108,3 +108,8 @@ namespace PdfDataExtractor.Controllers
         }
     }
 }
+
+
+
+
+https://www.nuget.org/packages/Syncfusion.OCRProcessor/
