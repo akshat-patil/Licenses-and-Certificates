@@ -1,0 +1,169 @@
+using System;
+using System.Configuration;
+using System.Data.SqlClient;
+using System.Web.UI;
+
+public partial class viewCSScrapNote : System.Web.UI.Page
+{
+    protected void Page_Load(object sender, EventArgs e)
+    {
+        if (!IsPostBack)
+        {
+            bindData();
+        }
+    }
+
+    private void bindData()
+    {
+        try
+        {
+            using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+            {
+                con.Open();
+
+                string sql = "SELECT * FROM tblScrapNote WHERE sid = " + hdnsid.Value;
+                using (SqlCommand cmd = new SqlCommand(sql, con))
+                using (SqlDataReader dr = cmd.ExecuteReader())
+                {
+                    if (dr.Read())
+                    {
+                        // You can display or bind data here if needed
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            lblMessage.ForeColor = System.Drawing.Color.Red;
+            lblMessage.Text = "Error loading Scrap Note: " + ex.Message;
+        }
+    }
+
+    protected void btnSubmit_Click(object sender, EventArgs e)
+    {
+        lblMessage.Text = string.Empty;
+
+        SqlTransaction tran = null;
+
+        try
+        {
+            using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+            {
+                con.Open();
+                tran = con.BeginTransaction();
+
+                // 1️⃣ Get total Scrap Stock Value (sum of all item rows)
+                decimal totalValueINR = 0;
+                decimal totalValueEUR = 0;
+                decimal conversionRate = 90; // Example: adjust to your actual rate
+
+                string sqlTotal = "SELECT SUM(ScrapStockValue) FROM tblScrapNoteTrans WHERE sid = " + hdnsid.Value;
+                using (SqlCommand cmdTotal = new SqlCommand(sqlTotal, con, tran))
+                {
+                    var result = cmdTotal.ExecuteScalar();
+                    if (result != DBNull.Value)
+                        totalValueINR = Convert.ToDecimal(result);
+                }
+
+                // 2️⃣ Convert INR → EUR
+                totalValueEUR = totalValueINR / conversionRate;
+
+                // 3️⃣ Apply business rules (Authorization Matrix)
+                int nextStatus = 0;
+                string nextStatusText = "";
+
+                if (totalValueEUR < 1000)
+                {
+                    nextStatus = 7; // BA/BU
+                    nextStatusText = "Pending at BA/BU";
+                }
+                else if (totalValueEUR >= 1000 && totalValueEUR < 5000)
+                {
+                    nextStatus = 6; // Warehouse
+                    nextStatusText = "Pending at Warehouse";
+                }
+                else if (totalValueEUR >= 5000 && totalValueEUR < 20000)
+                {
+                    nextStatus = 2; // Controlling
+                    nextStatusText = "Pending at Controlling";
+                }
+                else if (totalValueEUR >= 20000 && totalValueEUR < 50000)
+                {
+                    nextStatus = 2; // Controlling
+                    nextStatusText = "Pending at Controlling";
+                }
+                else if (totalValueEUR >= 50000)
+                {
+                    nextStatus = 2; // Controlling
+                    nextStatusText = "Pending at Controlling";
+                }
+
+                // 4️⃣ Update Scrap Note status based on calculated flow
+                string sqlUpdate = "UPDATE tblScrapNote SET status = " + nextStatus + ", statusText = '" + nextStatusText + "' WHERE sid = " + hdnsid.Value;
+                using (SqlCommand cmdUpdate = new SqlCommand(sqlUpdate, con, tran))
+                {
+                    cmdUpdate.ExecuteNonQuery();
+                }
+
+                // 5️⃣ Insert flow record for tracking
+                string sqlInsert = "INSERT INTO tblFlow (sid, addedBy, status, statusText, csComment) " +
+                                   "VALUES (" + hdnsid.Value + ", '" + hdnuid.Value.ToString() + "', " + nextStatus + ", '" + nextStatusText + "', 'Submitted by CS')";
+                using (SqlCommand cmdInsert = new SqlCommand(sqlInsert, con, tran))
+                {
+                    cmdInsert.ExecuteNonQuery();
+                }
+
+                // 6️⃣ Commit transaction
+                tran.Commit();
+
+                lblMessage.ForeColor = System.Drawing.Color.Green;
+                lblMessage.Text = "Scrap Note submitted successfully!<br/>" +
+                                  "Total Scrap Value (INR): " + totalValueINR.ToString("N2") + "<br/>" +
+                                  "Total Scrap Value (EUR): " + totalValueEUR.ToString("N2") + "<br/>" +
+                                  "Next Step: " + nextStatusText;
+            }
+        }
+        catch (Exception ex)
+        {
+            if (tran != null)
+                tran.Rollback();
+
+            lblMessage.ForeColor = System.Drawing.Color.Red;
+            lblMessage.Text = "Exception occurred while submitting Scrap Note: " + ex.Message;
+        }
+    }
+
+    protected void btnReject_Click(object sender, EventArgs e)
+    {
+        lblMessage.Text = string.Empty;
+
+        try
+        {
+            using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+            {
+                con.Open();
+
+                string sqlReject = "UPDATE tblScrapNote SET status = 99, statusText = 'Rejected by CS' WHERE sid = " + hdnsid.Value;
+                using (SqlCommand cmdReject = new SqlCommand(sqlReject, con))
+                {
+                    cmdReject.ExecuteNonQuery();
+                }
+
+                string sqlFlow = "INSERT INTO tblFlow (sid, addedBy, status, statusText, csComment) " +
+                                 "VALUES (" + hdnsid.Value + ", '" + hdnuid.Value.ToString() + "', 99, 'Rejected by CS', 'Rejected by CS')";
+                using (SqlCommand cmdFlow = new SqlCommand(sqlFlow, con))
+                {
+                    cmdFlow.ExecuteNonQuery();
+                }
+
+                lblMessage.ForeColor = System.Drawing.Color.Red;
+                lblMessage.Text = "Scrap Note rejected successfully!";
+            }
+        }
+        catch (Exception ex)
+        {
+            lblMessage.ForeColor = System.Drawing.Color.Red;
+            lblMessage.Text = "Exception occurred while rejecting Scrap Note: " + ex.Message;
+        }
+    }
+}
