@@ -1,0 +1,110 @@
+using System;
+using System.Configuration;
+using System.Data;
+using System.Data.SqlClient;
+
+/// <summary>
+/// Handles business rule logic (Authorization Matrix) for Scrap Notes.
+/// No UI, only backend operations.
+/// </summary>
+public static class FlowManager
+{
+    // Main method to call after scrap note submission
+    public static void ApplyFlow(int sid, string addedBy)
+    {
+        // Connection string from web.config
+        string connString = ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString();
+
+        try
+        {
+            using (SqlConnection con = new SqlConnection(connString))
+            {
+                con.Open();
+
+                // 1️⃣ Calculate total ScrapQtyStockValue for this scrap note
+                decimal totalValue = 0;
+
+                string sqlTotal = "SELECT SUM(ScrapQtyStockValue) FROM tblScrapNoteTrans WHERE sid = @sid";
+                using (SqlCommand cmdTotal = new SqlCommand(sqlTotal, con))
+                {
+                    cmdTotal.Parameters.AddWithValue("@sid", sid);
+                    var result = cmdTotal.ExecuteScalar();
+                    if (result != DBNull.Value && result != null)
+                        totalValue = Convert.ToDecimal(result);
+                }
+
+                // 2️⃣ Determine next status and status text based on the value (business matrix)
+                int nextStatus = 0;
+                string nextStatusText = "";
+
+                if (totalValue < 1000)
+                {
+                    // Option 1
+                    nextStatus = 7; // BA/BU
+                    nextStatusText = "Pending at BA/BU";
+                }
+                else if (totalValue >= 1000 && totalValue < 5000)
+                {
+                    // Option 2
+                    nextStatus = 6; // Warehouse
+                    nextStatusText = "Pending at Warehouse";
+                }
+                else if (totalValue >= 5000 && totalValue < 20000)
+                {
+                    // Option 3
+                    nextStatus = 2; // Controlling
+                    nextStatusText = "Pending at Controlling";
+                }
+                else if (totalValue >= 20000 && totalValue < 50000)
+                {
+                    // Option 4
+                    nextStatus = 2; // Controlling
+                    nextStatusText = "Pending at Controlling";
+                }
+                else if (totalValue >= 50000)
+                {
+                    // Option 5
+                    nextStatus = 2; // Controlling
+                    nextStatusText = "Pending at Controlling";
+                }
+
+                // 3️⃣ Update tblScrapNote with new status
+                string sqlUpdate = "UPDATE tblScrapNote SET status = @status, statusText = @statusText WHERE sid = @sid";
+                using (SqlCommand cmdUpdate = new SqlCommand(sqlUpdate, con))
+                {
+                    cmdUpdate.Parameters.AddWithValue("@status", nextStatus);
+                    cmdUpdate.Parameters.AddWithValue("@statusText", nextStatusText);
+                    cmdUpdate.Parameters.AddWithValue("@sid", sid);
+                    cmdUpdate.ExecuteNonQuery();
+                }
+
+                // 4️⃣ Insert flow record for tracking
+                string sqlInsert = @"INSERT INTO tblFlow (sid, addedBy, status, statusText, csComment)
+                                     VALUES (@sid, @addedBy, @status, @statusText, @comment)";
+                using (SqlCommand cmdInsert = new SqlCommand(sqlInsert, con))
+                {
+                    cmdInsert.Parameters.AddWithValue("@sid", sid);
+                    cmdInsert.Parameters.AddWithValue("@addedBy", addedBy);
+                    cmdInsert.Parameters.AddWithValue("@status", nextStatus);
+                    cmdInsert.Parameters.AddWithValue("@statusText", nextStatusText);
+                    cmdInsert.Parameters.AddWithValue("@comment", "Scrap Note submitted by CS");
+                    cmdInsert.ExecuteNonQuery();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // Log or handle exception as needed
+            // For safety, don’t throw it — prevent UI crash
+            System.Diagnostics.Debug.WriteLine("Error in FlowManager.ApplyFlow: " + ex.Message);
+        }
+    }
+}
+
+
+
+
+
+
+
+FlowManager.ApplyFlow(sid, Session["uid"].ToString());
