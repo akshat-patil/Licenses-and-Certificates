@@ -108,3 +108,85 @@ public static class FlowManager
 
 
 FlowManager.ApplyFlow(sid, Session["uid"].ToString());
+
+
+
+private void ApplyBusinessRules(int sid)
+{
+    try
+    {
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+
+            // 1️⃣ Calculate total ScrapQtyStockValue for this scrap note
+            decimal totalValue = 0;
+            string sqlTotal = "SELECT SUM(ScrapQtyStockValue) FROM tblScrapNoteTrans WHERE sid = @sid";
+            using (SqlCommand cmdTotal = new SqlCommand(sqlTotal, con))
+            {
+                cmdTotal.Parameters.AddWithValue("@sid", sid);
+                var result = cmdTotal.ExecuteScalar();
+                if (result != DBNull.Value && result != null)
+                    totalValue = Convert.ToDecimal(result);
+            }
+
+            // 2️⃣ Determine next status and text based on totalValue
+            int nextStatus = 0;
+            string nextStatusText = "";
+
+            if (totalValue < 1000)
+            {
+                nextStatus = 7; // BA/BU
+                nextStatusText = "Pending at BA/BU";
+            }
+            else if (totalValue >= 1000 && totalValue < 5000)
+            {
+                nextStatus = 6; // Warehouse
+                nextStatusText = "Pending at Warehouse";
+            }
+            else if (totalValue >= 5000 && totalValue < 20000)
+            {
+                nextStatus = 2; // Controlling
+                nextStatusText = "Pending at Controlling";
+            }
+            else if (totalValue >= 20000 && totalValue < 50000)
+            {
+                nextStatus = 2; // Controlling
+                nextStatusText = "Pending at Controlling";
+            }
+            else if (totalValue >= 50000)
+            {
+                nextStatus = 2; // Controlling
+                nextStatusText = "Pending at Controlling";
+            }
+
+            // 3️⃣ Update tblScrapNote
+            string sqlUpdate = "UPDATE tblScrapNote SET status = @status, statusText = @statusText WHERE sid = @sid";
+            using (SqlCommand cmdUpdate = new SqlCommand(sqlUpdate, con))
+            {
+                cmdUpdate.Parameters.AddWithValue("@status", nextStatus);
+                cmdUpdate.Parameters.AddWithValue("@statusText", nextStatusText);
+                cmdUpdate.Parameters.AddWithValue("@sid", sid);
+                cmdUpdate.ExecuteNonQuery();
+            }
+
+            // 4️⃣ Insert into tblFlow
+            string sqlInsert = @"INSERT INTO tblFlow (sid, addedBy, status, statusText, csComment)
+                                 VALUES (@sid, @addedBy, @status, @statusText, @comment)";
+            using (SqlCommand cmdInsert = new SqlCommand(sqlInsert, con))
+            {
+                cmdInsert.Parameters.AddWithValue("@sid", sid);
+                cmdInsert.Parameters.AddWithValue("@addedBy", Session["uid"].ToString());
+                cmdInsert.Parameters.AddWithValue("@status", nextStatus);
+                cmdInsert.Parameters.AddWithValue("@statusText", nextStatusText);
+                cmdInsert.Parameters.AddWithValue("@comment", "Scrap Note submitted by CS");
+                cmdInsert.ExecuteNonQuery();
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Error applying business rules: " + ex.Message;
+    }
+}
