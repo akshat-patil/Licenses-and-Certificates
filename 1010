@@ -160,3 +160,27 @@ ApplyBusinessRules(sid);
 
 // ✅ Now safely commit
 oSqlTransaction.Commit();
+
+
+
+
+
+{
+    oSqlFlowCommand.ExecuteNonQuery();
+    oSqlTransaction.Commit();
+}
+
+// ✅ Now safe to fetch sid (use a new connection)
+int sid = 0;
+using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ConnectionString))
+{
+    con.Open();
+    using (SqlCommand cmdId = new SqlCommand("SELECT TOP 1 sid FROM [tblScrapNote] WHERE [addedBy] = @addedBy ORDER BY sid DESC", con))
+    {
+        cmdId.Parameters.AddWithValue("@addedBy", Session["uid"].ToString());
+        sid = Convert.ToInt32(cmdId.ExecuteScalar());
+    }
+}
+
+// ✅ Now apply the business rules
+ApplyBusinessRules(sid);
