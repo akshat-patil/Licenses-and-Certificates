@@ -140,3 +140,23 @@ catch { }
 
 lblMessage.ForeColor = Color.Red;
 lblMessage.Text = "Exception Occurred: " + oException.Message.ToString();
+
+
+
+
+// ✅ execute scrap note insertion
+oSqlFlowCommand.ExecuteNonQuery();
+
+// ✅ get latest sid immediately after execution
+int sid = 0;
+using (SqlCommand cmdId = new SqlCommand("SELECT TOP 1 sid FROM tblScrapNote WHERE addedBy = @addedBy ORDER BY sid DESC", oSqlConnection, oSqlTransaction))
+{
+    cmdId.Parameters.AddWithValue("@addedBy", Session["uid"].ToString());
+    sid = Convert.ToInt32(cmdId.ExecuteScalar());
+}
+
+// ✅ Apply business rules BEFORE committing the transaction
+ApplyBusinessRules(sid);
+
+// ✅ Now safely commit
+oSqlTransaction.Commit();
