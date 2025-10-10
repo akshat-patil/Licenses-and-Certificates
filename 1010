@@ -127,3 +127,16 @@ using (SqlCommand cmdId = new SqlCommand("SELECT TOP 1 sid FROM tblScrapNote WHE
 
 // apply logic
 ApplyBusinessRules(sid);
+
+
+
+
+try
+{
+    if (oSqlTransaction != null && oSqlTransaction.Connection != null)
+        oSqlTransaction.Rollback();
+}
+catch { }
+
+lblMessage.ForeColor = Color.Red;
+lblMessage.Text = "Exception Occurred: " + oException.Message.ToString();
