@@ -903,3 +903,130 @@ private void ApplyBusinessRules(int sid, SqlConnection conn)
         lblMessage.Text = "Error applying business rules: " + ex.Message;
     }
 }
+
+
+
+
+
+
+
+private class FlowStep
+{
+    public int Status;
+    public string StatusText;
+}
+
+private void ApplyBusinessRules(int sid, SqlConnection conn)
+{
+    try
+    {
+        decimal totalValue = 0;
+
+        // Calculate total ScrapQtyStockValue
+        using (SqlCommand cmd = new SqlCommand("SELECT ISNULL(SUM(CAST([ScrapQtyStockValue] AS DECIMAL(18,2))),0) FROM [tblScrapNoteTrans] WHERE [sid]=@sid", conn))
+        {
+            cmd.Parameters.AddWithValue("@sid", sid);
+            object result = cmd.ExecuteScalar();
+            if (result != DBNull.Value && result != null)
+                totalValue = Convert.ToDecimal(result);
+        }
+
+        // Clear any existing flow for this scrap note
+        using (SqlCommand cmdDel = new SqlCommand("DELETE FROM [tblFlow] WHERE [sid]=@sid", conn))
+        {
+            cmdDel.Parameters.AddWithValue("@sid", sid);
+            cmdDel.ExecuteNonQuery();
+        }
+
+        // Prepare route list
+        List<FlowStep> route = new List<FlowStep>();
+
+        if (totalValue <= 1000)
+        {
+            // BA/BU → Env → Warehouse
+            route.Add(new FlowStep { Status = 6, StatusText = "Pending at BA/BU" });
+            route.Add(new FlowStep { Status = 9, StatusText = "Pending at Env" });
+            route.Add(new FlowStep { Status = 20, StatusText = "Pending at Warehouse" });
+        }
+        else if (totalValue > 1000 && totalValue <= 5000)
+        {
+            // Warehouse → BA/BU → Env → Warehouse
+            route.Add(new FlowStep { Status = 5, StatusText = "Pending at Warehouse" });
+            route.Add(new FlowStep { Status = 6, StatusText = "Pending at BA/BU" });
+            route.Add(new FlowStep { Status = 9, StatusText = "Pending at Env" });
+            route.Add(new FlowStep { Status = 20, StatusText = "Pending at Warehouse" });
+        }
+        else if (totalValue > 5000 && totalValue <= 20000)
+        {
+            // Controlling → Tax → COO → CFO → Warehouse → BA/BU → Warehouse
+            route.Add(new FlowStep { Status = 1, StatusText = "Pending at Controlling" });
+            route.Add(new FlowStep { Status = 2, StatusText = "Pending at Taxation" });
+            route.Add(new FlowStep { Status = 3, StatusText = "Pending at COO" });
+            route.Add(new FlowStep { Status = 4, StatusText = "Pending at CFO" });
+            route.Add(new FlowStep { Status = 5, StatusText = "Pending at Warehouse" });
+            route.Add(new FlowStep { Status = 6, StatusText = "Pending at BA/BU" });
+            route.Add(new FlowStep { Status = 20, StatusText = "Pending at Warehouse" });
+        }
+        else if (totalValue > 20000 && totalValue <= 50000)
+        {
+            // Controlling → Tax → COO → CFO → Warehouse → BA/BU → BG/CFO → Warehouse
+            route.Add(new FlowStep { Status = 1, StatusText = "Pending at Controlling" });
+            route.Add(new FlowStep { Status = 2, StatusText = "Pending at Taxation" });
+            route.Add(new FlowStep { Status = 3, StatusText = "Pending at COO" });
+            route.Add(new FlowStep { Status = 4, StatusText = "Pending at CFO" });
+            route.Add(new FlowStep { Status = 5, StatusText = "Pending at Warehouse" });
+            route.Add(new FlowStep { Status = 6, StatusText = "Pending at BA/BU" });
+            route.Add(new FlowStep { Status = 7, StatusText = "Pending at BG/CFO" });
+            route.Add(new FlowStep { Status = 20, StatusText = "Pending at Warehouse" });
+        }
+        else
+        {
+            // >50000 → Controlling → Tax → COO → CFO → Warehouse → BA/BU → BG/CFO → BG/CEO → Env → Warehouse
+            route.Add(new FlowStep { Status = 1, StatusText = "Pending at Controlling" });
+            route.Add(new FlowStep { Status = 2, StatusText = "Pending at Taxation" });
+            route.Add(new FlowStep { Status = 3, StatusText = "Pending at COO" });
+            route.Add(new FlowStep { Status = 4, StatusText = "Pending at CFO" });
+            route.Add(new FlowStep { Status = 5, StatusText = "Pending at Warehouse" });
+            route.Add(new FlowStep { Status = 6, StatusText = "Pending at BA/BU" });
+            route.Add(new FlowStep { Status = 7, StatusText = "Pending at BG/CFO" });
+            route.Add(new FlowStep { Status = 8, StatusText = "Pending at BG/CEO" });
+            route.Add(new FlowStep { Status = 9, StatusText = "Pending at Env" });
+            route.Add(new FlowStep { Status = 20, StatusText = "Pending at Warehouse" });
+        }
+
+        // Insert all route steps into tblFlow
+        foreach (FlowStep step in route)
+        {
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]) VALUES (@sid,@addedBy,@status,@statusText)";
+            using (SqlCommand cmdIns = new SqlCommand(sqlInsert, conn))
+            {
+                cmdIns.Parameters.AddWithValue("@sid", sid);
+                cmdIns.Parameters.AddWithValue("@addedBy", Session["uid"].ToString());
+                cmdIns.Parameters.AddWithValue("@status", step.Status);
+                cmdIns.Parameters.AddWithValue("@statusText", step.StatusText);
+                cmdIns.ExecuteNonQuery();
+            }
+        }
+
+        // Update tblScrapNote with the first step
+        if (route.Count > 0)
+        {
+            FlowStep first = route[0];
+            using (SqlCommand cmdUp = new SqlCommand("UPDATE [tblScrapNote] SET [status]=@status,[statusText]=@statusText WHERE [sid]=@sid", conn))
+            {
+                cmdUp.Parameters.AddWithValue("@sid", sid);
+                cmdUp.Parameters.AddWithValue("@status", first.Status);
+                cmdUp.Parameters.AddWithValue("@statusText", first.StatusText);
+                cmdUp.ExecuteNonQuery();
+            }
+        }
+
+        lblMessage.ForeColor = System.Drawing.Color.Green;
+        lblMessage.Text = "Business rules applied successfully (Total Value: " + totalValue.ToString("N2") + ")";
+    }
+    catch (Exception ex)
+    {
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Error applying business rules: " + ex.Message;
+    }
+}
