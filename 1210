@@ -242,3 +242,61 @@ using (SqlConnection conSid = new SqlConnection(ConfigurationManager.ConnectionS
 }
 
 ApplyBusinessRules(sid);
+
+
+
+
+
+
+
+private string GetNextStep(decimal totalValue, int currentStatus, out int nextStatus)
+{
+    nextStatus = currentStatus;
+    string nextStatusText = "";
+
+    if (totalValue <= 1000)
+    {
+        if (currentStatus == 6) { nextStatus = 9; nextStatusText = "Pending at Env"; }
+        else if (currentStatus == 9) { nextStatus = 20; nextStatusText = "Pending at Warehouse"; }
+    }
+    else if (totalValue > 1000 && totalValue <= 5000)
+    {
+        if (currentStatus == 5) { nextStatus = 6; nextStatusText = "Pending at BA/BU"; }
+        else if (currentStatus == 6) { nextStatus = 9; nextStatusText = "Pending at Env"; }
+        else if (currentStatus == 9) { nextStatus = 20; nextStatusText = "Pending at Warehouse"; }
+    }
+    else if (totalValue > 5000 && totalValue <= 20000)
+    {
+        if (currentStatus == 1) { nextStatus = 2; nextStatusText = "Pending at Taxation"; }
+        else if (currentStatus == 2) { nextStatus = 3; nextStatusText = "Pending at COO"; }
+        else if (currentStatus == 3) { nextStatus = 4; nextStatusText = "Pending at CFO"; }
+        else if (currentStatus == 4) { nextStatus = 5; nextStatusText = "Pending at Warehouse"; }
+        else if (currentStatus == 5) { nextStatus = 6; nextStatusText = "Pending at BA/BU"; }
+        else if (currentStatus == 6) { nextStatus = 20; nextStatusText = "Pending at Warehouse"; }
+    }
+    else if (totalValue > 20000 && totalValue <= 50000)
+    {
+        if (currentStatus == 1) { nextStatus = 2; nextStatusText = "Pending at Taxation"; }
+        else if (currentStatus == 2) { nextStatus = 3; nextStatusText = "Pending at COO"; }
+        else if (currentStatus == 3) { nextStatus = 4; nextStatusText = "Pending at CFO"; }
+        else if (currentStatus == 4) { nextStatus = 5; nextStatusText = "Pending at Warehouse"; }
+        else if (currentStatus == 5) { nextStatus = 6; nextStatusText = "Pending at BA/BU"; }
+        else if (currentStatus == 6) { nextStatus = 7; nextStatusText = "Pending at BG/CFO"; }
+        else if (currentStatus == 7) { nextStatus = 20; nextStatusText = "Pending at Warehouse"; }
+    }
+    else
+    {
+        // >50000 full flow
+        if (currentStatus == 1) { nextStatus = 2; nextStatusText = "Pending at Taxation"; }
+        else if (currentStatus == 2) { nextStatus = 3; nextStatusText = "Pending at COO"; }
+        else if (currentStatus == 3) { nextStatus = 4; nextStatusText = "Pending at CFO"; }
+        else if (currentStatus == 4) { nextStatus = 5; nextStatusText = "Pending at Warehouse"; }
+        else if (currentStatus == 5) { nextStatus = 6; nextStatusText = "Pending at BA/BU"; }
+        else if (currentStatus == 6) { nextStatus = 7; nextStatusText = "Pending at BG/CFO"; }
+        else if (currentStatus == 7) { nextStatus = 8; nextStatusText = "Pending at BG/CEO"; }
+        else if (currentStatus == 8) { nextStatus = 9; nextStatusText = "Pending at Env"; }
+        else if (currentStatus == 9) { nextStatus = 20; nextStatusText = "Pending at Warehouse"; }
+    }
+
+    return nextStatusText;
+}
