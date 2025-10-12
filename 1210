@@ -1,0 +1,122 @@
+private void ApplyBusinessRules(int sid)
+{
+    try
+    {
+        lblMessage.ForeColor = System.Drawing.Color.Blue;
+        lblMessage.Text = "Business rule method triggered! SID = " + sid.ToString();
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+
+            // 1️⃣ Calculate total scrap stock value
+            decimal totalValue = 0;
+            string sqlTotal = "SELECT SUM([ScrapQtyStockValue]) FROM [tblScrapNoteTrans] WHERE [sid] = @sid";
+            using (SqlCommand cmdTotal = new SqlCommand(sqlTotal, con))
+            {
+                cmdTotal.Parameters.AddWithValue("@sid", sid);
+                object result = cmdTotal.ExecuteScalar();
+                if (result != DBNull.Value && result != null)
+                    totalValue = Convert.ToDecimal(result);
+            }
+
+            lblMessage.Text = "Business rules running — Total Scrap Value = " + totalValue.ToString();
+
+            // 2️⃣ Prepare the full flow sequence
+            List<KeyValuePair<int, string>> flowSequence = new List<KeyValuePair<int, string>>();
+
+            if (totalValue <= 1000)
+            {
+                flowSequence.Add(new KeyValuePair<int, string>(6, "Pending at BA/BU"));
+                flowSequence.Add(new KeyValuePair<int, string>(9, "Pending at Env"));
+                flowSequence.Add(new KeyValuePair<int, string>(20, "Pending at Warehouse"));
+            }
+            else if (totalValue > 1000 && totalValue <= 5000)
+            {
+                flowSequence.Add(new KeyValuePair<int, string>(5, "Pending at Warehouse"));
+                flowSequence.Add(new KeyValuePair<int, string>(6, "Pending at BA/BU"));
+                flowSequence.Add(new KeyValuePair<int, string>(9, "Pending at Env"));
+                flowSequence.Add(new KeyValuePair<int, string>(20, "Pending at Warehouse"));
+            }
+            else if (totalValue > 5000 && totalValue <= 20000)
+            {
+                flowSequence.Add(new KeyValuePair<int, string>(1, "Pending at Controlling"));
+                flowSequence.Add(new KeyValuePair<int, string>(2, "Pending at Taxation"));
+                flowSequence.Add(new KeyValuePair<int, string>(3, "Pending at COO"));
+                flowSequence.Add(new KeyValuePair<int, string>(4, "Pending at CFO"));
+                flowSequence.Add(new KeyValuePair<int, string>(5, "Pending at Warehouse"));
+                flowSequence.Add(new KeyValuePair<int, string>(6, "Pending at BA/BU"));
+                flowSequence.Add(new KeyValuePair<int, string>(20, "Pending at Warehouse"));
+            }
+            else if (totalValue > 20000 && totalValue <= 50000)
+            {
+                flowSequence.Add(new KeyValuePair<int, string>(1, "Pending at Controlling"));
+                flowSequence.Add(new KeyValuePair<int, string>(2, "Pending at Taxation"));
+                flowSequence.Add(new KeyValuePair<int, string>(3, "Pending at COO"));
+                flowSequence.Add(new KeyValuePair<int, string>(4, "Pending at CFO"));
+                flowSequence.Add(new KeyValuePair<int, string>(5, "Pending at Warehouse"));
+                flowSequence.Add(new KeyValuePair<int, string>(6, "Pending at BA/BU"));
+                flowSequence.Add(new KeyValuePair<int, string>(7, "Pending at BG/CFO"));
+                flowSequence.Add(new KeyValuePair<int, string>(20, "Pending at Warehouse"));
+            }
+            else if (totalValue > 50000)
+            {
+                flowSequence.Add(new KeyValuePair<int, string>(1, "Pending at Controlling"));
+                flowSequence.Add(new KeyValuePair<int, string>(2, "Pending at Taxation"));
+                flowSequence.Add(new KeyValuePair<int, string>(3, "Pending at COO"));
+                flowSequence.Add(new KeyValuePair<int, string>(4, "Pending at CFO"));
+                flowSequence.Add(new KeyValuePair<int, string>(5, "Pending at Warehouse"));
+                flowSequence.Add(new KeyValuePair<int, string>(6, "Pending at BA/BU"));
+                flowSequence.Add(new KeyValuePair<int, string>(7, "Pending at BG/CFO"));
+                flowSequence.Add(new KeyValuePair<int, string>(8, "Pending at BG/CEO"));
+                flowSequence.Add(new KeyValuePair<int, string>(9, "Pending at Env"));
+                flowSequence.Add(new KeyValuePair<int, string>(20, "Pending at Warehouse"));
+            }
+
+            if (flowSequence.Count == 0)
+            {
+                lblMessage.ForeColor = System.Drawing.Color.Red;
+                lblMessage.Text = "No business rule matched the value " + totalValue.ToString();
+                return;
+            }
+
+            // 3️⃣ Force-update tblScrapNote to first stage
+            int firstStatus = flowSequence[0].Key;
+            string firstText = flowSequence[0].Value;
+
+            string sqlUpdate = "UPDATE [tblScrapNote] SET [status] = @status, [statusText] = @statusText WHERE [sid] = @sid";
+            using (SqlCommand cmdUpdate = new SqlCommand(sqlUpdate, con))
+            {
+                cmdUpdate.Parameters.AddWithValue("@status", firstStatus);
+                cmdUpdate.Parameters.AddWithValue("@statusText", firstText);
+                cmdUpdate.Parameters.AddWithValue("@sid", sid);
+                cmdUpdate.ExecuteNonQuery();
+            }
+
+            // 4️⃣ Insert full sequence into tblFlow
+            foreach (KeyValuePair<int, string> step in flowSequence)
+            {
+                string sqlInsert = @"INSERT INTO [tblFlow] 
+                    ([sid], [addedBy], [status], [statusText], [creatorComment]) 
+                    VALUES (@sid, @addedBy, @status, @statusText, @comment)";
+                using (SqlCommand cmdInsert = new SqlCommand(sqlInsert, con))
+                {
+                    cmdInsert.Parameters.AddWithValue("@sid", sid);
+                    cmdInsert.Parameters.AddWithValue("@addedBy", Session["uid"].ToString());
+                    cmdInsert.Parameters.AddWithValue("@status", step.Key);
+                    cmdInsert.Parameters.AddWithValue("@statusText", step.Value);
+                    cmdInsert.Parameters.AddWithValue("@comment", "Flow step pre-defined by business rules");
+                    cmdInsert.ExecuteNonQuery();
+                }
+            }
+
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Business rules applied successfully. Total Value = " + totalValue.ToString();
+        }
+    }
+    catch (Exception ex)
+    {
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Error applying business rules: " + ex.Message;
+    }
+}
