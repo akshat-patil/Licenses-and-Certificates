@@ -1,45 +1,50 @@
+// add at top of file if not already
+using System.Collections.Generic;
+
 private void ApplyBusinessRules(int sid)
 {
     try
     {
+        // Feedback for quick debug
         lblMessage.ForeColor = System.Drawing.Color.Blue;
-        lblMessage.Text = "Business rule method triggered! SID = " + sid.ToString();
+        lblMessage.Text = "Applying business rules... SID=" + sid.ToString();
 
         using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
         {
             con.Open();
 
-            // 1️⃣ Calculate total scrap stock value
-            decimal totalValue = 0;
+            // 1) total value calculation (sum from detail table)
+            decimal totalValue = 0m;
             string sqlTotal = "SELECT SUM([ScrapQtyStockValue]) FROM [tblScrapNoteTrans] WHERE [sid] = @sid";
             using (SqlCommand cmdTotal = new SqlCommand(sqlTotal, con))
             {
                 cmdTotal.Parameters.AddWithValue("@sid", sid);
-                object result = cmdTotal.ExecuteScalar();
-                if (result != DBNull.Value && result != null)
-                    totalValue = Convert.ToDecimal(result);
+                object o = cmdTotal.ExecuteScalar();
+                if (o != null && o != DBNull.Value)
+                    totalValue = Convert.ToDecimal(o);
             }
 
-            lblMessage.Text = "Business rules running — Total Scrap Value = " + totalValue.ToString();
-
-            // 2️⃣ Prepare the full flow sequence
+            // 2) prepare full flow sequence based on value
             List<KeyValuePair<int, string>> flowSequence = new List<KeyValuePair<int, string>>();
 
-            if (totalValue <= 1000)
+            if (totalValue <= 1000m)
             {
+                // BA/BU -> ENV -> final WH
                 flowSequence.Add(new KeyValuePair<int, string>(6, "Pending at BA/BU"));
                 flowSequence.Add(new KeyValuePair<int, string>(9, "Pending at Env"));
                 flowSequence.Add(new KeyValuePair<int, string>(20, "Pending at Warehouse"));
             }
-            else if (totalValue > 1000 && totalValue <= 5000)
+            else if (totalValue > 1000m && totalValue <= 5000m)
             {
+                // WH -> BA/BU -> ENV -> final WH
                 flowSequence.Add(new KeyValuePair<int, string>(5, "Pending at Warehouse"));
                 flowSequence.Add(new KeyValuePair<int, string>(6, "Pending at BA/BU"));
                 flowSequence.Add(new KeyValuePair<int, string>(9, "Pending at Env"));
                 flowSequence.Add(new KeyValuePair<int, string>(20, "Pending at Warehouse"));
             }
-            else if (totalValue > 5000 && totalValue <= 20000)
+            else if (totalValue > 5000m && totalValue <= 20000m)
             {
+                // Controlling -> Taxation -> COO -> CFO -> WH -> BA/BU -> final WH
                 flowSequence.Add(new KeyValuePair<int, string>(1, "Pending at Controlling"));
                 flowSequence.Add(new KeyValuePair<int, string>(2, "Pending at Taxation"));
                 flowSequence.Add(new KeyValuePair<int, string>(3, "Pending at COO"));
@@ -48,8 +53,9 @@ private void ApplyBusinessRules(int sid)
                 flowSequence.Add(new KeyValuePair<int, string>(6, "Pending at BA/BU"));
                 flowSequence.Add(new KeyValuePair<int, string>(20, "Pending at Warehouse"));
             }
-            else if (totalValue > 20000 && totalValue <= 50000)
+            else if (totalValue > 20000m && totalValue <= 50000m)
             {
+                // Controlling -> Taxation -> COO -> CFO -> WH -> BA/BU -> BG/CFO -> final WH
                 flowSequence.Add(new KeyValuePair<int, string>(1, "Pending at Controlling"));
                 flowSequence.Add(new KeyValuePair<int, string>(2, "Pending at Taxation"));
                 flowSequence.Add(new KeyValuePair<int, string>(3, "Pending at COO"));
@@ -59,8 +65,9 @@ private void ApplyBusinessRules(int sid)
                 flowSequence.Add(new KeyValuePair<int, string>(7, "Pending at BG/CFO"));
                 flowSequence.Add(new KeyValuePair<int, string>(20, "Pending at Warehouse"));
             }
-            else if (totalValue > 50000)
+            else // > 50000
             {
+                // Full flow: Controlling -> Taxation -> COO -> CFO -> WH -> BA/BU -> BG/CFO -> BG/CEO -> ENV -> final WH
                 flowSequence.Add(new KeyValuePair<int, string>(1, "Pending at Controlling"));
                 flowSequence.Add(new KeyValuePair<int, string>(2, "Pending at Taxation"));
                 flowSequence.Add(new KeyValuePair<int, string>(3, "Pending at COO"));
@@ -76,47 +83,162 @@ private void ApplyBusinessRules(int sid)
             if (flowSequence.Count == 0)
             {
                 lblMessage.ForeColor = System.Drawing.Color.Red;
-                lblMessage.Text = "No business rule matched the value " + totalValue.ToString();
+                lblMessage.Text = "Business rules produced empty route (value=" + totalValue.ToString() + ")";
                 return;
             }
 
-            // 3️⃣ Force-update tblScrapNote to first stage
+            // 3) update tblScrapNote to first status
             int firstStatus = flowSequence[0].Key;
             string firstText = flowSequence[0].Value;
 
-            string sqlUpdate = "UPDATE [tblScrapNote] SET [status] = @status, [statusText] = @statusText WHERE [sid] = @sid";
-            using (SqlCommand cmdUpdate = new SqlCommand(sqlUpdate, con))
+            string updSql = "UPDATE [tblScrapNote] SET [status] = @status, [statusText] = @statusText WHERE [sid] = @sid";
+            using (SqlCommand cmdUpd = new SqlCommand(updSql, con))
             {
-                cmdUpdate.Parameters.AddWithValue("@status", firstStatus);
-                cmdUpdate.Parameters.AddWithValue("@statusText", firstText);
-                cmdUpdate.Parameters.AddWithValue("@sid", sid);
-                cmdUpdate.ExecuteNonQuery();
+                cmdUpd.Parameters.AddWithValue("@status", firstStatus);
+                cmdUpd.Parameters.AddWithValue("@statusText", firstText);
+                cmdUpd.Parameters.AddWithValue("@sid", sid);
+                cmdUpd.ExecuteNonQuery();
             }
 
-            // 4️⃣ Insert full sequence into tblFlow
+            // 4) Insert the full route into tblFlow in order (this is the pre-defined route)
             foreach (KeyValuePair<int, string> step in flowSequence)
             {
-                string sqlInsert = @"INSERT INTO [tblFlow] 
-                    ([sid], [addedBy], [status], [statusText], [creatorComment]) 
-                    VALUES (@sid, @addedBy, @status, @statusText, @comment)";
-                using (SqlCommand cmdInsert = new SqlCommand(sqlInsert, con))
+                string insSql = @"INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText],[creatorComment]) 
+                                  VALUES (@sid,@addedBy,@status,@statusText,@comment)";
+                using (SqlCommand cmdIns = new SqlCommand(insSql, con))
                 {
-                    cmdInsert.Parameters.AddWithValue("@sid", sid);
-                    cmdInsert.Parameters.AddWithValue("@addedBy", Session["uid"].ToString());
-                    cmdInsert.Parameters.AddWithValue("@status", step.Key);
-                    cmdInsert.Parameters.AddWithValue("@statusText", step.Value);
-                    cmdInsert.Parameters.AddWithValue("@comment", "Flow step pre-defined by business rules");
-                    cmdInsert.ExecuteNonQuery();
+                    cmdIns.Parameters.AddWithValue("@sid", sid);
+                    cmdIns.Parameters.AddWithValue("@addedBy", Session["uid"].ToString());
+                    cmdIns.Parameters.AddWithValue("@status", step.Key);
+                    cmdIns.Parameters.AddWithValue("@statusText", step.Value);
+                    cmdIns.Parameters.AddWithValue("@comment", "Predefined flow step");
+                    cmdIns.ExecuteNonQuery();
                 }
             }
 
             lblMessage.ForeColor = System.Drawing.Color.Green;
-            lblMessage.Text = "Business rules applied successfully. Total Value = " + totalValue.ToString();
+            lblMessage.Text = "Business rules applied. Total=" + totalValue.ToString();
         }
     }
     catch (Exception ex)
     {
         lblMessage.ForeColor = System.Drawing.Color.Red;
-        lblMessage.Text = "Error applying business rules: " + ex.Message;
+        lblMessage.Text = "ApplyBusinessRules error: " + ex.Message;
     }
 }
+
+
+
+
+protected void btnSubmit_Click(object sender, EventArgs e)
+{
+    SqlTransaction tran = null;
+
+    try
+    {
+        int sid = Convert.ToInt32(hdnsid.Value);
+        string userId = Session["uid"].ToString();
+        string commentText = txtCOORemark.Text.Trim();
+        string commentColumn = "cooComment"; // for tblFlow
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+            tran = con.BeginTransaction();
+
+            // 1️⃣ Get the current active status for this scrap note
+            int currentStatus = 3; // COO’s own status = 3
+
+            // 2️⃣ Find the fid of current step in tblFlow
+            int currentFid = 0;
+            string sqlGetFid = "SELECT MIN([fid]) FROM [tblFlow] WHERE [sid] = @sid AND [status] = @status";
+            using (SqlCommand cmd = new SqlCommand(sqlGetFid, con, tran))
+            {
+                cmd.Parameters.AddWithValue("@sid", sid);
+                cmd.Parameters.AddWithValue("@status", currentStatus);
+                object result = cmd.ExecuteScalar();
+                if (result != null && result != DBNull.Value)
+                    currentFid = Convert.ToInt32(result);
+            }
+
+            // 3️⃣ Find the next step from the predefined route
+            int nextStatus = 0;
+            string nextText = "";
+            string sqlNext = "SELECT TOP 1 [fid],[status],[statusText] FROM [tblFlow] WHERE [sid] = @sid AND [fid] > @fid ORDER BY [fid] ASC";
+            using (SqlCommand cmdNext = new SqlCommand(sqlNext, con, tran))
+            {
+                cmdNext.Parameters.AddWithValue("@sid", sid);
+                cmdNext.Parameters.AddWithValue("@fid", currentFid);
+                using (SqlDataReader dr = cmdNext.ExecuteReader())
+                {
+                    if (dr.Read())
+                    {
+                        nextStatus = Convert.ToInt32(dr["status"]);
+                        nextText = dr["statusText"].ToString();
+                    }
+                }
+            }
+
+            // 4️⃣ If there’s no next step, close the note
+            if (nextStatus == 0)
+            {
+                nextStatus = 21;
+                nextText = "Scrap Note Closed at Warehouse";
+            }
+
+            // 5️⃣ Update tblScrapNote to the next stage
+            string sqlUpdate = "UPDATE [tblScrapNote] SET [status] = @status, [statusText] = @statusText WHERE [sid] = @sid";
+            using (SqlCommand cmdUpdate = new SqlCommand(sqlUpdate, con, tran))
+            {
+                cmdUpdate.Parameters.AddWithValue("@status", nextStatus);
+                cmdUpdate.Parameters.AddWithValue("@statusText", nextText);
+                cmdUpdate.Parameters.AddWithValue("@sid", sid);
+                cmdUpdate.ExecuteNonQuery();
+            }
+
+            // 6️⃣ Insert into tblFlow with COO’s comment
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]," + commentColumn + ") " +
+                               "VALUES (@sid,@addedBy,@status,@statusText,@comment)";
+            using (SqlCommand cmdInsert = new SqlCommand(sqlInsert, con, tran))
+            {
+                cmdInsert.Parameters.AddWithValue("@sid", sid);
+                cmdInsert.Parameters.AddWithValue("@addedBy", userId);
+                cmdInsert.Parameters.AddWithValue("@status", nextStatus);
+                cmdInsert.Parameters.AddWithValue("@statusText", nextText);
+                cmdInsert.Parameters.AddWithValue("@comment", commentText);
+                cmdInsert.ExecuteNonQuery();
+            }
+
+            // 7️⃣ Commit the transaction
+            tran.Commit();
+
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Scrap Note forwarded successfully to next department: " + nextText;
+        }
+    }
+    catch (Exception ex)
+    {
+        try { if (tran != null && tran.Connection != null) tran.Rollback(); } catch { }
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Exception occurred: " + ex.Message;
+    }
+}
+
+
+
+
+
+int sid = 0;
+using (SqlConnection conSid = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+{
+    conSid.Open();
+    using (SqlCommand cmdId = new SqlCommand("SELECT TOP 1 [sid] FROM [tblScrapNote] WHERE [uid] = @uid ORDER BY [sid] DESC", conSid))
+    {
+        cmdId.Parameters.AddWithValue("@uid", Session["uid"].ToString());
+        object o = cmdId.ExecuteScalar();
+        if (o != null && o != DBNull.Value)
+            sid = Convert.ToInt32(o);
+    }
+}
+
+ApplyBusinessRules(sid);
