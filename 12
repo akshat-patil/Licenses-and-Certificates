@@ -789,3 +789,117 @@ protected void btnClose_Click(object sender, EventArgs e)
         lblMessage.Text = "Error closing scrap note: " + ex.Message;
     }
 }
+
+
+
+private void ApplyBusinessRules(int sid, SqlConnection conn)
+{
+    try
+    {
+        decimal totalValue = 0;
+
+        // Calculate total ScrapQtyStockValue
+        using (SqlCommand cmd = new SqlCommand("SELECT ISNULL(SUM(CAST([ScrapQtyStockValue] AS DECIMAL(18,2))),0) FROM [tblScrapNoteTrans] WHERE [sid]=@sid", conn))
+        {
+            cmd.Parameters.AddWithValue("@sid", sid);
+            totalValue = Convert.ToDecimal(cmd.ExecuteScalar());
+        }
+
+        // Clear old route if any
+        using (SqlCommand cmdDel = new SqlCommand("DELETE FROM [tblFlow] WHERE [sid]=@sid", conn))
+        {
+            cmdDel.Parameters.AddWithValue("@sid", sid);
+            cmdDel.ExecuteNonQuery();
+        }
+
+        // Build department route list
+        List<(int status, string text)> route = new List<(int, string)>();
+
+        if (totalValue <= 1000)
+        {
+            // BA/BU → ENV → Warehouse
+            route.Add((6, "Pending at BA/BU"));
+            route.Add((9, "Pending at Env"));
+            route.Add((20, "Pending at Warehouse"));
+        }
+        else if (totalValue > 1000 && totalValue <= 5000)
+        {
+            // Warehouse → BA/BU → ENV → Warehouse
+            route.Add((5, "Pending at Warehouse"));
+            route.Add((6, "Pending at BA/BU"));
+            route.Add((9, "Pending at Env"));
+            route.Add((20, "Pending at Warehouse"));
+        }
+        else if (totalValue > 5000 && totalValue <= 20000)
+        {
+            // Controlling → Tax → COO → CFO → Warehouse → BA/BU → Warehouse
+            route.Add((1, "Pending at Controlling"));
+            route.Add((2, "Pending at Taxation"));
+            route.Add((3, "Pending at COO"));
+            route.Add((4, "Pending at CFO"));
+            route.Add((5, "Pending at Warehouse"));
+            route.Add((6, "Pending at BA/BU"));
+            route.Add((20, "Pending at Warehouse"));
+        }
+        else if (totalValue > 20000 && totalValue <= 50000)
+        {
+            // Controlling → Tax → COO → CFO → Warehouse → BA/BU → BG/CFO → Warehouse
+            route.Add((1, "Pending at Controlling"));
+            route.Add((2, "Pending at Taxation"));
+            route.Add((3, "Pending at COO"));
+            route.Add((4, "Pending at CFO"));
+            route.Add((5, "Pending at Warehouse"));
+            route.Add((6, "Pending at BA/BU"));
+            route.Add((7, "Pending at BG/CFO"));
+            route.Add((20, "Pending at Warehouse"));
+        }
+        else // > 50000
+        {
+            // Controlling → Tax → COO → CFO → Warehouse → BA/BU → BG/CFO → BG/CEO → ENV → Warehouse
+            route.Add((1, "Pending at Controlling"));
+            route.Add((2, "Pending at Taxation"));
+            route.Add((3, "Pending at COO"));
+            route.Add((4, "Pending at CFO"));
+            route.Add((5, "Pending at Warehouse"));
+            route.Add((6, "Pending at BA/BU"));
+            route.Add((7, "Pending at BG/CFO"));
+            route.Add((8, "Pending at BG/CEO"));
+            route.Add((9, "Pending at Env"));
+            route.Add((20, "Pending at Warehouse"));
+        }
+
+        // Insert route in tblFlow
+        int fid = 1;
+        foreach (var step in route)
+        {
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]) VALUES (@sid,@addedBy,@status,@statusText)";
+            using (SqlCommand cmdIns = new SqlCommand(sqlInsert, conn))
+            {
+                cmdIns.Parameters.AddWithValue("@sid", sid);
+                cmdIns.Parameters.AddWithValue("@addedBy", Session["uid"].ToString());
+                cmdIns.Parameters.AddWithValue("@status", step.status);
+                cmdIns.Parameters.AddWithValue("@statusText", step.text);
+                cmdIns.ExecuteNonQuery();
+            }
+            fid++;
+        }
+
+        // Update tblScrapNote with the first step of the route
+        var firstStep = route.First();
+        using (SqlCommand cmdUp = new SqlCommand("UPDATE [tblScrapNote] SET [status]=@status, [statusText]=@statusText WHERE [sid]=@sid", conn))
+        {
+            cmdUp.Parameters.AddWithValue("@sid", sid);
+            cmdUp.Parameters.AddWithValue("@status", firstStep.status);
+            cmdUp.Parameters.AddWithValue("@statusText", firstStep.text);
+            cmdUp.ExecuteNonQuery();
+        }
+
+        lblMessage.ForeColor = System.Drawing.Color.Green;
+        lblMessage.Text = "Business rule applied. Total value = " + totalValue.ToString("N2") + " INR.";
+    }
+    catch (Exception ex)
+    {
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Error applying business rules: " + ex.Message;
+    }
+}
