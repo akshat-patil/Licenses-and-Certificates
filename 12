@@ -1,0 +1,791 @@
+protected void btnSubmit_Click(object sender, EventArgs e)
+{
+    SqlTransaction tran = null;
+    try
+    {
+        int sid = Convert.ToInt32(hdnsid.Value);
+        string userId = Session["uid"].ToString();
+        string commentText = txtCtrlRemark.Text.Trim(); // change control name if different
+        string commentColumn = "controllingComment";
+        int currentStatus = 1; // Controlling
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+            tran = con.BeginTransaction();
+
+            // find current fid
+            int currentFid = 0;
+            using (SqlCommand cmdF = new SqlCommand("SELECT MIN([fid]) FROM [tblFlow] WHERE [sid]=@sid AND [status]=@status", con, tran))
+            {
+                cmdF.Parameters.AddWithValue("@sid", sid);
+                cmdF.Parameters.AddWithValue("@status", currentStatus);
+                object of = cmdF.ExecuteScalar();
+                if (of != null && of != DBNull.Value) currentFid = Convert.ToInt32(of);
+            }
+
+            // get next step
+            int nextStatus = 0; string nextText = "";
+            using (SqlCommand cmdN = new SqlCommand("SELECT TOP 1 [fid],[status],[statusText] FROM [tblFlow] WHERE [sid]=@sid AND [fid] > @fid ORDER BY [fid] ASC", con, tran))
+            {
+                cmdN.Parameters.AddWithValue("@sid", sid);
+                cmdN.Parameters.AddWithValue("@fid", currentFid);
+                using (SqlDataReader dr = cmdN.ExecuteReader())
+                {
+                    if (dr.Read())
+                    {
+                        nextStatus = Convert.ToInt32(dr["status"]);
+                        nextText = dr["statusText"].ToString();
+                    }
+                }
+            }
+
+            if (nextStatus == 0)
+            {
+                nextStatus = 21;
+                nextText = "Scrap Note Closed at Warehouse";
+            }
+
+            // update main
+            using (SqlCommand cmdU = new SqlCommand("UPDATE [tblScrapNote] SET [status]=@status,[statusText]=@statusText WHERE [sid]=@sid", con, tran))
+            {
+                cmdU.Parameters.AddWithValue("@status", nextStatus);
+                cmdU.Parameters.AddWithValue("@statusText", nextText);
+                cmdU.Parameters.AddWithValue("@sid", sid);
+                cmdU.ExecuteNonQuery();
+            }
+
+            // insert flow with controllingComment
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]," + commentColumn + ") VALUES (@sid,@addedBy,@status,@statusText,@comment)";
+            using (SqlCommand cmdI = new SqlCommand(sqlInsert, con, tran))
+            {
+                cmdI.Parameters.AddWithValue("@sid", sid);
+                cmdI.Parameters.AddWithValue("@addedBy", userId);
+                cmdI.Parameters.AddWithValue("@status", nextStatus);
+                cmdI.Parameters.AddWithValue("@statusText", nextText);
+                cmdI.Parameters.AddWithValue("@comment", commentText);
+                cmdI.ExecuteNonQuery();
+            }
+
+            tran.Commit();
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Accepted and forwarded: " + nextText;
+        }
+    }
+    catch (Exception ex)
+    {
+        try { if (tran != null && tran.Connection != null) tran.Rollback(); } catch { }
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Exception occurred: " + ex.Message;
+    }
+}
+
+
+
+
+
+
+
+protected void btnSubmit_Click(object sender, EventArgs e)
+{
+    SqlTransaction tran = null;
+    try
+    {
+        int sid = Convert.ToInt32(hdnsid.Value);
+        string userId = Session["uid"].ToString();
+        string commentText = txtTaxRemark.Text.Trim(); // change if different
+        string commentColumn = "taxationComment";
+        int currentStatus = 2; // Taxation
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+            tran = con.BeginTransaction();
+
+            int currentFid = 0;
+            using (SqlCommand cmdF = new SqlCommand("SELECT MIN([fid]) FROM [tblFlow] WHERE [sid]=@sid AND [status]=@status", con, tran))
+            {
+                cmdF.Parameters.AddWithValue("@sid", sid);
+                cmdF.Parameters.AddWithValue("@status", currentStatus);
+                object of = cmdF.ExecuteScalar();
+                if (of != null && of != DBNull.Value) currentFid = Convert.ToInt32(of);
+            }
+
+            int nextStatus = 0; string nextText = "";
+            using (SqlCommand cmdN = new SqlCommand("SELECT TOP 1 [fid],[status],[statusText] FROM [tblFlow] WHERE [sid]=@sid AND [fid] > @fid ORDER BY [fid] ASC", con, tran))
+            {
+                cmdN.Parameters.AddWithValue("@sid", sid);
+                cmdN.Parameters.AddWithValue("@fid", currentFid);
+                using (SqlDataReader dr = cmdN.ExecuteReader())
+                {
+                    if (dr.Read())
+                    {
+                        nextStatus = Convert.ToInt32(dr["status"]);
+                        nextText = dr["statusText"].ToString();
+                    }
+                }
+            }
+
+            if (nextStatus == 0)
+            {
+                nextStatus = 21;
+                nextText = "Scrap Note Closed at Warehouse";
+            }
+
+            using (SqlCommand cmdU = new SqlCommand("UPDATE [tblScrapNote] SET [status]=@status,[statusText]=@statusText WHERE [sid]=@sid", con, tran))
+            {
+                cmdU.Parameters.AddWithValue("@status", nextStatus);
+                cmdU.Parameters.AddWithValue("@statusText", nextText);
+                cmdU.Parameters.AddWithValue("@sid", sid);
+                cmdU.ExecuteNonQuery();
+            }
+
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]," + commentColumn + ") VALUES (@sid,@addedBy,@status,@statusText,@comment)";
+            using (SqlCommand cmdI = new SqlCommand(sqlInsert, con, tran))
+            {
+                cmdI.Parameters.AddWithValue("@sid", sid);
+                cmdI.Parameters.AddWithValue("@addedBy", userId);
+                cmdI.Parameters.AddWithValue("@status", nextStatus);
+                cmdI.Parameters.AddWithValue("@statusText", nextText);
+                cmdI.Parameters.AddWithValue("@comment", commentText);
+                cmdI.ExecuteNonQuery();
+            }
+
+            tran.Commit();
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Accepted and forwarded: " + nextText;
+        }
+    }
+    catch (Exception ex)
+    {
+        try { if (tran != null && tran.Connection != null) tran.Rollback(); } catch { }
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Exception occurred: " + ex.Message;
+    }
+}
+
+
+
+
+
+protected void btnSubmit_Click(object sender, EventArgs e)
+{
+    SqlTransaction tran = null;
+    try
+    {
+        int sid = Convert.ToInt32(hdnsid.Value);
+        string userId = Session["uid"].ToString();
+        string commentText = txtCOORemark.Text.Trim(); // your control name
+        string commentColumn = "cooComment";
+        int currentStatus = 3; // COO
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+            tran = con.BeginTransaction();
+
+            int currentFid = 0;
+            using (SqlCommand cmdF = new SqlCommand("SELECT MIN([fid]) FROM [tblFlow] WHERE [sid]=@sid AND [status]=@status", con, tran))
+            {
+                cmdF.Parameters.AddWithValue("@sid", sid);
+                cmdF.Parameters.AddWithValue("@status", currentStatus);
+                object of = cmdF.ExecuteScalar();
+                if (of != null && of != DBNull.Value) currentFid = Convert.ToInt32(of);
+            }
+
+            int nextStatus = 0; string nextText = "";
+            using (SqlCommand cmdN = new SqlCommand("SELECT TOP 1 [fid],[status],[statusText] FROM [tblFlow] WHERE [sid]=@sid AND [fid] > @fid ORDER BY [fid] ASC", con, tran))
+            {
+                cmdN.Parameters.AddWithValue("@sid", sid);
+                cmdN.Parameters.AddWithValue("@fid", currentFid);
+                using (SqlDataReader dr = cmdN.ExecuteReader())
+                {
+                    if (dr.Read())
+                    {
+                        nextStatus = Convert.ToInt32(dr["status"]);
+                        nextText = dr["statusText"].ToString();
+                    }
+                }
+            }
+
+            if (nextStatus == 0)
+            {
+                nextStatus = 21;
+                nextText = "Scrap Note Closed at Warehouse";
+            }
+
+            using (SqlCommand cmdU = new SqlCommand("UPDATE [tblScrapNote] SET [status]=@status,[statusText]=@statusText WHERE [sid]=@sid", con, tran))
+            {
+                cmdU.Parameters.AddWithValue("@status", nextStatus);
+                cmdU.Parameters.AddWithValue("@statusText", nextText);
+                cmdU.Parameters.AddWithValue("@sid", sid);
+                cmdU.ExecuteNonQuery();
+            }
+
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]," + commentColumn + ") VALUES (@sid,@addedBy,@status,@statusText,@comment)";
+            using (SqlCommand cmdI = new SqlCommand(sqlInsert, con, tran))
+            {
+                cmdI.Parameters.AddWithValue("@sid", sid);
+                cmdI.Parameters.AddWithValue("@addedBy", userId);
+                cmdI.Parameters.AddWithValue("@status", nextStatus);
+                cmdI.Parameters.AddWithValue("@statusText", nextText);
+                cmdI.Parameters.AddWithValue("@comment", commentText);
+                cmdI.ExecuteNonQuery();
+            }
+
+            tran.Commit();
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Accepted and forwarded: " + nextText;
+        }
+    }
+    catch (Exception ex)
+    {
+        try { if (tran != null && tran.Connection != null) tran.Rollback(); } catch { }
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Exception occurred: " + ex.Message;
+    }
+}
+
+
+
+
+
+
+
+protected void btnSubmit_Click(object sender, EventArgs e)
+{
+    SqlTransaction tran = null;
+    try
+    {
+        int sid = Convert.ToInt32(hdnsid.Value);
+        string userId = Session["uid"].ToString();
+        string commentText = txtCfoRemark.Text.Trim(); // change if different
+        string commentColumn = "cfoComment";
+        int currentStatus = 4; // CFO
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+            tran = con.BeginTransaction();
+
+            int currentFid = 0;
+            using (SqlCommand cmdF = new SqlCommand("SELECT MIN([fid]) FROM [tblFlow] WHERE [sid]=@sid AND [status]=@status", con, tran))
+            {
+                cmdF.Parameters.AddWithValue("@sid", sid);
+                cmdF.Parameters.AddWithValue("@status", currentStatus);
+                object of = cmdF.ExecuteScalar();
+                if (of != null && of != DBNull.Value) currentFid = Convert.ToInt32(of);
+            }
+
+            int nextStatus = 0; string nextText = "";
+            using (SqlCommand cmdN = new SqlCommand("SELECT TOP 1 [fid],[status],[statusText] FROM [tblFlow] WHERE [sid]=@sid AND [fid] > @fid ORDER BY [fid] ASC", con, tran))
+            {
+                cmdN.Parameters.AddWithValue("@sid", sid);
+                cmdN.Parameters.AddWithValue("@fid", currentFid);
+                using (SqlDataReader dr = cmdN.ExecuteReader())
+                {
+                    if (dr.Read())
+                    {
+                        nextStatus = Convert.ToInt32(dr["status"]);
+                        nextText = dr["statusText"].ToString();
+                    }
+                }
+            }
+
+            if (nextStatus == 0)
+            {
+                nextStatus = 21;
+                nextText = "Scrap Note Closed at Warehouse";
+            }
+
+            using (SqlCommand cmdU = new SqlCommand("UPDATE [tblScrapNote] SET [status]=@status,[statusText]=@statusText WHERE [sid]=@sid", con, tran))
+            {
+                cmdU.Parameters.AddWithValue("@status", nextStatus);
+                cmdU.Parameters.AddWithValue("@statusText", nextText);
+                cmdU.Parameters.AddWithValue("@sid", sid);
+                cmdU.ExecuteNonQuery();
+            }
+
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]," + commentColumn + ") VALUES (@sid,@addedBy,@status,@statusText,@comment)";
+            using (SqlCommand cmdI = new SqlCommand(sqlInsert, con, tran))
+            {
+                cmdI.Parameters.AddWithValue("@sid", sid);
+                cmdI.Parameters.AddWithValue("@addedBy", userId);
+                cmdI.Parameters.AddWithValue("@status", nextStatus);
+                cmdI.Parameters.AddWithValue("@statusText", nextText);
+                cmdI.Parameters.AddWithValue("@comment", commentText);
+                cmdI.ExecuteNonQuery();
+            }
+
+            tran.Commit();
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Accepted and forwarded: " + nextText;
+        }
+    }
+    catch (Exception ex)
+    {
+        try { if (tran != null && tran.Connection != null) tran.Rollback(); } catch { }
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Exception occurred: " + ex.Message;
+    }
+}
+
+
+
+
+
+
+protected void btnSubmit_Click(object sender, EventArgs e)
+{
+    SqlTransaction tran = null;
+    try
+    {
+        int sid = Convert.ToInt32(hdnsid.Value);
+        string userId = Session["uid"].ToString();
+        string commentText = txtWHRemark.Text.Trim(); // change if different
+        string commentColumn = "whComment";
+        int currentStatus = 5; // Warehouse mid-step
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+            tran = con.BeginTransaction();
+
+            int currentFid = 0;
+            using (SqlCommand cmdF = new SqlCommand("SELECT MIN([fid]) FROM [tblFlow] WHERE [sid]=@sid AND [status]=@status", con, tran))
+            {
+                cmdF.Parameters.AddWithValue("@sid", sid);
+                cmdF.Parameters.AddWithValue("@status", currentStatus);
+                object of = cmdF.ExecuteScalar();
+                if (of != null && of != DBNull.Value) currentFid = Convert.ToInt32(of);
+            }
+
+            int nextStatus = 0; string nextText = "";
+            using (SqlCommand cmdN = new SqlCommand("SELECT TOP 1 [fid],[status],[statusText] FROM [tblFlow] WHERE [sid]=@sid AND [fid] > @fid ORDER BY [fid] ASC", con, tran))
+            {
+                cmdN.Parameters.AddWithValue("@sid", sid);
+                cmdN.Parameters.AddWithValue("@fid", currentFid);
+                using (SqlDataReader dr = cmdN.ExecuteReader())
+                {
+                    if (dr.Read())
+                    {
+                        nextStatus = Convert.ToInt32(dr["status"]);
+                        nextText = dr["statusText"].ToString();
+                    }
+                }
+            }
+
+            if (nextStatus == 0)
+            {
+                nextStatus = 21;
+                nextText = "Scrap Note Closed at Warehouse";
+            }
+
+            using (SqlCommand cmdU = new SqlCommand("UPDATE [tblScrapNote] SET [status]=@status,[statusText]=@statusText WHERE [sid]=@sid", con, tran))
+            {
+                cmdU.Parameters.AddWithValue("@status", nextStatus);
+                cmdU.Parameters.AddWithValue("@statusText", nextText);
+                cmdU.Parameters.AddWithValue("@sid", sid);
+                cmdU.ExecuteNonQuery();
+            }
+
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]," + commentColumn + ") VALUES (@sid,@addedBy,@status,@statusText,@comment)";
+            using (SqlCommand cmdI = new SqlCommand(sqlInsert, con, tran))
+            {
+                cmdI.Parameters.AddWithValue("@sid", sid);
+                cmdI.Parameters.AddWithValue("@addedBy", userId);
+                cmdI.Parameters.AddWithValue("@status", nextStatus);
+                cmdI.Parameters.AddWithValue("@statusText", nextText);
+                cmdI.Parameters.AddWithValue("@comment", commentText);
+                cmdI.ExecuteNonQuery();
+            }
+
+            tran.Commit();
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Accepted and forwarded: " + nextText;
+        }
+    }
+    catch (Exception ex)
+    {
+        try { if (tran != null && tran.Connection != null) tran.Rollback(); } catch { }
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Exception occurred: " + ex.Message;
+    }
+}
+
+
+
+
+
+
+
+protected void btnSubmit_Click(object sender, EventArgs e)
+{
+    SqlTransaction tran = null;
+    try
+    {
+        int sid = Convert.ToInt32(hdnsid.Value);
+        string userId = Session["uid"].ToString();
+        string commentText = txtBABURemark.Text.Trim(); // change control if different
+        string commentColumn = "babuComment";
+        int currentStatus = 6; // BA/BU
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+            tran = con.BeginTransaction();
+
+            int currentFid = 0;
+            using (SqlCommand cmdF = new SqlCommand("SELECT MIN([fid]) FROM [tblFlow] WHERE [sid]=@sid AND [status]=@status", con, tran))
+            {
+                cmdF.Parameters.AddWithValue("@sid", sid);
+                cmdF.Parameters.AddWithValue("@status", currentStatus);
+                object of = cmdF.ExecuteScalar();
+                if (of != null && of != DBNull.Value) currentFid = Convert.ToInt32(of);
+            }
+
+            int nextStatus = 0; string nextText = "";
+            using (SqlCommand cmdN = new SqlCommand("SELECT TOP 1 [fid],[status],[statusText] FROM [tblFlow] WHERE [sid]=@sid AND [fid] > @fid ORDER BY [fid] ASC", con, tran))
+            {
+                cmdN.Parameters.AddWithValue("@sid", sid);
+                cmdN.Parameters.AddWithValue("@fid", currentFid);
+                using (SqlDataReader dr = cmdN.ExecuteReader())
+                {
+                    if (dr.Read())
+                    {
+                        nextStatus = Convert.ToInt32(dr["status"]);
+                        nextText = dr["statusText"].ToString();
+                    }
+                }
+            }
+
+            if (nextStatus == 0)
+            {
+                nextStatus = 21;
+                nextText = "Scrap Note Closed at Warehouse";
+            }
+
+            using (SqlCommand cmdU = new SqlCommand("UPDATE [tblScrapNote] SET [status]=@status,[statusText]=@statusText WHERE [sid]=@sid", con, tran))
+            {
+                cmdU.Parameters.AddWithValue("@status", nextStatus);
+                cmdU.Parameters.AddWithValue("@statusText", nextText);
+                cmdU.Parameters.AddWithValue("@sid", sid);
+                cmdU.ExecuteNonQuery();
+            }
+
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]," + commentColumn + ") VALUES (@sid,@addedBy,@status,@statusText,@comment)";
+            using (SqlCommand cmdI = new SqlCommand(sqlInsert, con, tran))
+            {
+                cmdI.Parameters.AddWithValue("@sid", sid);
+                cmdI.Parameters.AddWithValue("@addedBy", userId);
+                cmdI.Parameters.AddWithValue("@status", nextStatus);
+                cmdI.Parameters.AddWithValue("@statusText", nextText);
+                cmdI.Parameters.AddWithValue("@comment", commentText);
+                cmdI.ExecuteNonQuery();
+            }
+
+            tran.Commit();
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Accepted and forwarded: " + nextText;
+        }
+    }
+    catch (Exception ex)
+    {
+        try { if (tran != null && tran.Connection != null) tran.Rollback(); } catch { }
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Exception occurred: " + ex.Message;
+    }
+}
+
+
+
+
+
+
+
+
+protected void btnSubmit_Click(object sender, EventArgs e)
+{
+    SqlTransaction tran = null;
+    try
+    {
+        int sid = Convert.ToInt32(hdnsid.Value);
+        string userId = Session["uid"].ToString();
+        string commentText = txtBgCfoRemark.Text.Trim(); // change if different
+        string commentColumn = "bgCfoComment";
+        int currentStatus = 7; // BG/CFO
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+            tran = con.BeginTransaction();
+
+            int currentFid = 0;
+            using (SqlCommand cmdF = new SqlCommand("SELECT MIN([fid]) FROM [tblFlow] WHERE [sid]=@sid AND [status]=@status", con, tran))
+            {
+                cmdF.Parameters.AddWithValue("@sid", sid);
+                cmdF.Parameters.AddWithValue("@status", currentStatus);
+                object of = cmdF.ExecuteScalar();
+                if (of != null && of != DBNull.Value) currentFid = Convert.ToInt32(of);
+            }
+
+            int nextStatus = 0; string nextText = "";
+            using (SqlCommand cmdN = new SqlCommand("SELECT TOP 1 [fid],[status],[statusText] FROM [tblFlow] WHERE [sid]=@sid AND [fid] > @fid ORDER BY [fid] ASC", con, tran))
+            {
+                cmdN.Parameters.AddWithValue("@sid", sid);
+                cmdN.Parameters.AddWithValue("@fid", currentFid);
+                using (SqlDataReader dr = cmdN.ExecuteReader())
+                {
+                    if (dr.Read())
+                    {
+                        nextStatus = Convert.ToInt32(dr["status"]);
+                        nextText = dr["statusText"].ToString();
+                    }
+                }
+            }
+
+            if (nextStatus == 0)
+            {
+                nextStatus = 21;
+                nextText = "Scrap Note Closed at Warehouse";
+            }
+
+            using (SqlCommand cmdU = new SqlCommand("UPDATE [tblScrapNote] SET [status]=@status,[statusText]=@statusText WHERE [sid]=@sid", con, tran))
+            {
+                cmdU.Parameters.AddWithValue("@status", nextStatus);
+                cmdU.Parameters.AddWithValue("@statusText", nextText);
+                cmdU.Parameters.AddWithValue("@sid", sid);
+                cmdU.ExecuteNonQuery();
+            }
+
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]," + commentColumn + ") VALUES (@sid,@addedBy,@status,@statusText,@comment)";
+            using (SqlCommand cmdI = new SqlCommand(sqlInsert, con, tran))
+            {
+                cmdI.Parameters.AddWithValue("@sid", sid);
+                cmdI.Parameters.AddWithValue("@addedBy", userId);
+                cmdI.Parameters.AddWithValue("@status", nextStatus);
+                cmdI.Parameters.AddWithValue("@statusText", nextText);
+                cmdI.Parameters.AddWithValue("@comment", commentText);
+                cmdI.ExecuteNonQuery();
+            }
+
+            tran.Commit();
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Accepted and forwarded: " + nextText;
+        }
+    }
+    catch (Exception ex)
+    {
+        try { if (tran != null && tran.Connection != null) tran.Rollback(); } catch { }
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Exception occurred: " + ex.Message;
+    }
+}
+
+
+
+
+
+
+
+protected void btnSubmit_Click(object sender, EventArgs e)
+{
+    SqlTransaction tran = null;
+    try
+    {
+        int sid = Convert.ToInt32(hdnsid.Value);
+        string userId = Session["uid"].ToString();
+        string commentText = txtBgCeoRemark.Text.Trim(); // change if differs
+        string commentColumn = "bgCeoComment";
+        int currentStatus = 8; // BG/CEO
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+            tran = con.BeginTransaction();
+
+            int currentFid = 0;
+            using (SqlCommand cmdF = new SqlCommand("SELECT MIN([fid]) FROM [tblFlow] WHERE [sid]=@sid AND [status]=@status", con, tran))
+            {
+                cmdF.Parameters.AddWithValue("@sid", sid);
+                cmdF.Parameters.AddWithWithValue("@status", currentStatus); // typo-safe: if your project uses different fetch, ensure consistency
+                object of = cmdF.ExecuteScalar();
+                if (of != null && of != DBNull.Value) currentFid = Convert.ToInt32(of);
+            }
+
+            int nextStatus = 0; string nextText = "";
+            using (SqlCommand cmdN = new SqlCommand("SELECT TOP 1 [fid],[status],[statusText] FROM [tblFlow] WHERE [sid]=@sid AND [fid] > @fid ORDER BY [fid] ASC", con, tran))
+            {
+                cmdN.Parameters.AddWithValue("@sid", sid);
+                cmdN.Parameters.AddWithValue("@fid", currentFid);
+                using (SqlDataReader dr = cmdN.ExecuteReader())
+                {
+                    if (dr.Read())
+                    {
+                        nextStatus = Convert.ToInt32(dr["status"]);
+                        nextText = dr["statusText"].ToString();
+                    }
+                }
+            }
+
+            if (nextStatus == 0)
+            {
+                nextStatus = 21;
+                nextText = "Scrap Note Closed at Warehouse";
+            }
+
+            using (SqlCommand cmdU = new SqlCommand("UPDATE [tblScrapNote] SET [status]=@status,[statusText]=@statusText WHERE [sid]=@sid", con, tran))
+            {
+                cmdU.Parameters.AddWithValue("@status", nextStatus);
+                cmdU.Parameters.AddWithValue("@statusText", nextText);
+                cmdU.Parameters.AddWithValue("@sid", sid);
+                cmdU.ExecuteNonQuery();
+            }
+
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]," + commentColumn + ") VALUES (@sid,@addedBy,@status,@statusText,@comment)";
+            using (SqlCommand cmdI = new SqlCommand(sqlInsert, con, tran))
+            {
+                cmdI.Parameters.AddWithValue("@sid", sid);
+                cmdI.Parameters.AddWithValue("@addedBy", userId);
+                cmdI.Parameters.AddWithValue("@status", nextStatus);
+                cmdI.Parameters.AddWithValue("@statusText", nextText);
+                cmdI.Parameters.AddWithValue("@comment", commentText);
+                cmdI.ExecuteNonQuery();
+            }
+
+            tran.Commit();
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Accepted and forwarded: " + nextText;
+        }
+    }
+    catch (Exception ex)
+    {
+        try { if (tran != null && tran.Connection != null) tran.Rollback(); } catch { }
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Exception occurred: " + ex.Message;
+    }
+}
+
+
+
+
+
+protected void btnSubmit_Click(object sender, EventArgs e)
+{
+    SqlTransaction tran = null;
+    try
+    {
+        int sid = Convert.ToInt32(hdnsid.Value);
+        string userId = Session["uid"].ToString();
+        string commentText = txtEnvRemark.Text.Trim(); // change if different
+        string commentColumn = "envComment";
+        int currentStatus = 9; // ENV
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+            tran = con.BeginTransaction();
+
+            int currentFid = 0;
+            using (SqlCommand cmdF = new SqlCommand("SELECT MIN([fid]) FROM [tblFlow] WHERE [sid]=@sid AND [status]=@status", con, tran))
+            {
+                cmdF.Parameters.AddWithValue("@sid", sid);
+                cmdF.Parameters.AddWithValue("@status", currentStatus);
+                object of = cmdF.ExecuteScalar();
+                if (of != null && of != DBNull.Value) currentFid = Convert.ToInt32(of);
+            }
+
+            int nextStatus = 0; string nextText = "";
+            using (SqlCommand cmdN = new SqlCommand("SELECT TOP 1 [fid],[status],[statusText] FROM [tblFlow] WHERE [sid]=@sid AND [fid] > @fid ORDER BY [fid] ASC", con, tran))
+            {
+                cmdN.Parameters.AddWithValue("@sid", sid);
+                cmdN.Parameters.AddWithValue("@fid", currentFid);
+                using (SqlDataReader dr = cmdN.ExecuteReader())
+                {
+                    if (dr.Read())
+                    {
+                        nextStatus = Convert.ToInt32(dr["status"]);
+                        nextText = dr["statusText"].ToString();
+                    }
+                }
+            }
+
+            if (nextStatus == 0)
+            {
+                nextStatus = 21;
+                nextText = "Scrap Note Closed at Warehouse";
+            }
+
+            using (SqlCommand cmdU = new SqlCommand("UPDATE [tblScrapNote] SET [status]=@status,[statusText]=@statusText WHERE [sid]=@sid", con, tran))
+            {
+                cmdU.Parameters.AddWithValue("@status", nextStatus);
+                cmdU.Parameters.AddWithValue("@statusText", nextText);
+                cmdU.Parameters.AddWithValue("@sid", sid);
+                cmdU.ExecuteNonQuery();
+            }
+
+            string sqlInsert = "INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText]," + commentColumn + ") VALUES (@sid,@addedBy,@status,@statusText,@comment)";
+            using (SqlCommand cmdI = new SqlCommand(sqlInsert, con, tran))
+            {
+                cmdI.Parameters.AddWithValue("@sid", sid);
+                cmdI.Parameters.AddWithValue("@addedBy", userId);
+                cmdI.Parameters.AddWithValue("@status", nextStatus);
+                cmdI.Parameters.AddWithValue("@statusText", nextText);
+                cmdI.Parameters.AddWithValue("@comment", commentText);
+                cmdI.ExecuteNonQuery();
+            }
+
+            tran.Commit();
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Accepted and forwarded: " + nextText;
+        }
+    }
+    catch (Exception ex)
+    {
+        try { if (tran != null && tran.Connection != null) tran.Rollback(); } catch { }
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Exception occurred: " + ex.Message;
+    }
+}
+
+
+
+
+
+
+protected void btnClose_Click(object sender, EventArgs e)
+{
+    try
+    {
+        int sid = Convert.ToInt32(hdnsid.Value);
+        string userId = Session["uid"].ToString();
+        string commentText = txtWHRemark.Text.Trim(); // change control if different
+
+        using (SqlConnection con = new SqlConnection(ConfigurationManager.ConnectionStrings["SiteSqlServer"].ToString()))
+        {
+            con.Open();
+
+            using (SqlCommand cmdU = new SqlCommand("UPDATE [tblScrapNote] SET [status]=21,[statusText]='Closed at Warehouse' WHERE [sid]=@sid", con))
+            {
+                cmdU.Parameters.AddWithValue("@sid", sid);
+                cmdU.ExecuteNonQuery();
+            }
+
+            using (SqlCommand cmdI = new SqlCommand("INSERT INTO [tblFlow] ([sid],[addedBy],[status],[statusText],[whComment]) VALUES (@sid,@addedBy,21,'Closed at Warehouse',@comment)", con))
+            {
+                cmdI.Parameters.AddWithValue("@sid", sid);
+                cmdI.Parameters.AddWithValue("@addedBy", userId);
+                cmdI.Parameters.AddWithValue("@comment", commentText);
+                cmdI.ExecuteNonQuery();
+            }
+
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Text = "Scrap Note closed successfully.";
+        }
+    }
+    catch (Exception ex)
+    {
+        lblMessage.ForeColor = System.Drawing.Color.Red;
+        lblMessage.Text = "Error closing scrap note: " + ex.Message;
+    }
+}
