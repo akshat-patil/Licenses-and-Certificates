@@ -1,0 +1,203 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning",
+      "Microsoft.Hosting.Lifetime": "Information"
+    }
+  },
+  "AllowedHosts": "*",
+  "Docstrange": {
+    "ApiKey": "c0a36f00-a34c-11f0-b42c-d6fc5c904995"
+  }
+}
+
+
+
+
+namespace YourProject.Models
+{
+    public class ExtractedData
+    {
+        public string? ExtractedText { get; set; }
+        public string? CsvPath { get; set; }
+    }
+}
+
+
+
+
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
+using YourProject.Models;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+
+namespace YourProject.Controllers
+{
+    public class HomeController : Controller
+    {
+        private readonly IConfiguration _config;
+        private readonly IWebHostEnvironment _env;
+
+        public HomeController(IConfiguration config, IWebHostEnvironment env)
+        {
+            _config = config;
+            _env = env;
+        }
+
+        public IActionResult Index()
+        {
+            return View();
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> ProcessFile(IFormFile file)
+        {
+            if (file == null || file.Length == 0)
+                return Json(new { success = false, message = "No file uploaded" });
+
+            // Save file locally
+            string uploads = Path.Combine(_env.WebRootPath, "uploads");
+            if (!Directory.Exists(uploads)) Directory.CreateDirectory(uploads);
+            string filePath = Path.Combine(uploads, file.FileName);
+
+            using (var stream = new FileStream(filePath, FileMode.Create))
+            {
+                await file.CopyToAsync(stream);
+            }
+
+            // Call Docstrange API
+            string apiKey = _config["Docstrange:ApiKey"]!;
+            using var client = new HttpClient();
+
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", apiKey);
+
+            var formData = new MultipartFormDataContent
+            {
+                { new StreamContent(System.IO.File.OpenRead(filePath)), "file", file.FileName },
+                { new StringContent("markdown"), "output_type" }
+            };
+
+            var response = await client.PostAsync("https://extraction-api.nanonets.com/extract", formData);
+            string result = await response.Content.ReadAsStringAsync();
+
+            // Parse the API result
+            var json = JsonDocument.Parse(result);
+            string extractedText = json.RootElement.ToString();
+
+            // Save extracted data as CSV
+            string csvPath = Path.Combine(uploads, Path.GetFileNameWithoutExtension(file.FileName) + "_data.csv");
+            await System.IO.File.WriteAllTextAsync(csvPath, extractedText);
+
+            return Json(new { success = true, csvPath = "/uploads/" + Path.GetFileName(csvPath) });
+        }
+    }
+}
+
+
+
+
+
+@{
+    ViewData["Title"] = "Docstrange Extractor";
+}
+
+<h2>Document Extraction to CSV</h2>
+
+<form id="uploadForm" enctype="multipart/form-data">
+    <div>
+        <label>Select File:</label>
+        <input type="file" id="fileInput" name="file" required />
+    </div>
+    <br />
+    <button type="button" id="processBtn">Process File</button>
+</form>
+
+<br />
+<div id="status"></div>
+<br />
+<a id="downloadLink" style="display:none;" download>Download CSV</a>
+
+<script>
+    document.getElementById("processBtn").addEventListener("click", async () => {
+        const fileInput = document.getElementById("fileInput");
+        const status = document.getElementById("status");
+        const downloadLink = document.getElementById("downloadLink");
+
+        if (!fileInput.files.length) {
+            alert("Please select a file first.");
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+
+        status.innerText = "Processing...";
+
+        const response = await fetch("/Home/ProcessFile", {
+            method: "POST",
+            body: formData
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            status.innerText = "Extraction complete!";
+            downloadLink.href = data.csvPath;
+            downloadLink.innerText = "Download CSV";
+            downloadLink.style.display = "inline-block";
+        } else {
+            status.innerText = "Error: " + data.message;
+        }
+    });
+</script>
+
+
+
+
+
+
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Hosting;
+
+namespace YourProject
+{
+    public class Program
+    {
+        public static void Main(string[] args)
+        {
+            CreateHostBuilder(args).Build().Run();
+        }
+
+        public static IHostBuilder CreateHostBuilder(string[] args) =>
+            Host.CreateDefaultBuilder(args)
+                .ConfigureWebHostDefaults(webBuilder =>
+                {
+                    webBuilder.UseStartup<Startup>();
+                });
+    }
+}
+
+
+
+
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddControllersWithViews();
+
+var app = builder.Build();
+if (!app.Environment.IsDevelopment()) app.UseExceptionHandler("/Home/Error");
+
+app.UseStaticFiles();
+app.UseRouting();
+
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Home}/{action=Index}/{id?}");
+
+app.Run();
+
