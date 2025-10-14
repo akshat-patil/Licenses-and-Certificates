@@ -1,431 +1,3 @@
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Configuration;
-using YourProject.Models;
-using System.Net.Http.Headers;
-using System.Text;
-using System.Text.Json;
-
-namespace YourProject.Controllers
-{
-    public class HomeController : Controller
-    {
-        private readonly IConfiguration _config;
-        private readonly IWebHostEnvironment _env;
-
-        public HomeController(IConfiguration config, IWebHostEnvironment env)
-        {
-            _config = config;
-            _env = env;
-        }
-
-        public IActionResult Index()
-        {
-            return View();
-        }
-
-        [HttpPost]
-        public async Task<IActionResult> ProcessFile(IFormFile file)
-        {
-            if (file == null || file.Length == 0)
-                return Json(new { success = false, message = "No file uploaded" });
-
-            // Save file locally
-            string uploads = Path.Combine(_env.WebRootPath, "uploads");
-            if (!Directory.Exists(uploads)) Directory.CreateDirectory(uploads);
-            string filePath = Path.Combine(uploads, file.FileName);
-
-            using (var stream = new FileStream(filePath, FileMode.Create))
-            {
-                await file.CopyToAsync(stream);
-            }
-
-            // Read configuration
-            string apiKey = _config["Docstrange:ApiKey"]!;
-            string modelId = _config["Docstrange:ModelId"]!;
-            string endpoint = $"https://app.nanonets.com/api/v2/OCR/Model/{modelId}/LabelFile/";
-
-            using var client = new HttpClient();
-
-            // Basic Auth with API Key
-            var byteArray = Encoding.ASCII.GetBytes($"{apiKey}:");
-            client.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Basic", Convert.ToBase64String(byteArray));
-
-            // Prepare request
-            var formData = new MultipartFormDataContent
-            {
-                { new StreamContent(System.IO.File.OpenRead(filePath)), "file", file.FileName }
-            };
-
-            // Send to Docstrange API
-            var response = await client.PostAsync(endpoint, formData);
-            string result = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
-                return Json(new { success = false, message = "API Error: " + result });
-
-            // Prepare CSV output path
-            string csvPath = Path.Combine(uploads, Path.GetFileNameWithoutExtension(file.FileName) + "_data.csv");
-
-            try
-            {
-                using var jsonDoc = JsonDocument.Parse(result);
-                using var writer = new StreamWriter(csvPath);
-                writer.WriteLine("Section,Label,Value");
-
-                var root = jsonDoc.RootElement.GetProperty("result")[0];
-
-                // --- Handle normal predictions ---
-                if (root.TryGetProperty("prediction", out var predictions))
-                {
-                    foreach (var item in predictions.EnumerateArray())
-                    {
-                        string label = item.GetProperty("label").GetString() ?? "";
-                        string text = item.GetProperty("ocr_text").GetString() ?? "";
-                        writer.WriteLine($"Field,\"{label}\",\"{text.Replace("\"", "\"\"")}\"");
-                    }
-                }
-
-                // --- Handle tables if present ---
-                if (root.TryGetProperty("tables", out var tables))
-                {
-                    foreach (var table in tables.EnumerateArray())
-                    {
-                        writer.WriteLine();
-                        writer.WriteLine("Table,---,---");
-
-                        var rows = table.GetProperty("rows");
-                        foreach (var row in rows.EnumerateArray())
-                        {
-                            List<string> cells = new();
-                            foreach (var cell in row.EnumerateArray())
-                            {
-                                string text = cell.GetProperty("text").GetString() ?? "";
-                                cells.Add($"\"{text.Replace("\"", "\"\"")}\"");
-                            }
-                            writer.WriteLine("Table,," + string.Join(",", cells));
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                await System.IO.File.WriteAllTextAsync(csvPath, "Error parsing structured data:\n" + ex.Message + "\n\nRaw response:\n" + result);
-            }
-
-            return Json(new { success = true, csvPath = "/uploads/" + Path.GetFileName(csvPath) });
-        }
-    }
-}
-337793ad-a8d8-11f0-a1f1-729589c37e55
-{
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft": "Warning",
-      "Microsoft.Hosting.Lifetime": "Information"
-    }
-  },
-  "AllowedHosts": "*",
-  "Docstrange": {
-    "ApiKey": "c0a36f00-a34c-11f0-b42c-d6fc5c904995"
-  }
-}
-
-
-
-
-namespace YourProject.Models
-{
-    public class ExtractedData
-    {
-        public string? ExtractedText { get; set; }
-        public string? CsvPath { get; set; }
-    }
-}
-
-
-
-
-
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Configuration;
-using YourProject.Models;
-using System.Net.Http.Headers;
-using System.Text;
-using System.Text.Json;
-
-namespace YourProject.Controllers
-{
-    public class HomeController : Controller
-    {
-        private readonly IConfiguration _config;
-        private readonly IWebHostEnvironment _env;
-
-        public HomeController(IConfiguration config, IWebHostEnvironment env)
-        {
-            _config = config;
-            _env = env;
-        }
-
-        public IActionResult Index()
-        {
-            return View();
-        }
-
-        [HttpPost]
-        public async Task<IActionResult> ProcessFile(IFormFile file)
-        {
-            if (file == null || file.Length == 0)
-                return Json(new { success = false, message = "No file uploaded" });
-
-            // Save file locally
-            string uploads = Path.Combine(_env.WebRootPath, "uploads");
-            if (!Directory.Exists(uploads)) Directory.CreateDirectory(uploads);
-            string filePath = Path.Combine(uploads, file.FileName);
-
-            using (var stream = new FileStream(filePath, FileMode.Create))
-            {
-                await file.CopyToAsync(stream);
-            }
-
-            // Call Docstrange API
-            string apiKey = _config["Docstrange:ApiKey"]!;
-            using var client = new HttpClient();
-
-            client.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", apiKey);
-
-            var formData = new MultipartFormDataContent
-            {
-                { new StreamContent(System.IO.File.OpenRead(filePath)), "file", file.FileName },
-                { new StringContent("markdown"), "output_type" }
-            };
-
-            var response = await client.PostAsync("https://extraction-api.nanonets.com/extract", formData);
-            string result = await response.Content.ReadAsStringAsync();
-
-            // Parse the API result
-            var json = JsonDocument.Parse(result);
-            string extractedText = json.RootElement.ToString();
-
-            // Save extracted data as CSV
-            string csvPath = Path.Combine(uploads, Path.GetFileNameWithoutExtension(file.FileName) + "_data.csv");
-            await System.IO.File.WriteAllTextAsync(csvPath, extractedText);
-
-            return Json(new { success = true, csvPath = "/uploads/" + Path.GetFileName(csvPath) });
-        }
-    }
-}
-
-
-
-
-
-@{
-    ViewData["Title"] = "Docstrange Extractor";
-}
-
-<h2>Document Extraction to CSV</h2>
-
-<form id="uploadForm" enctype="multipart/form-data">
-    <div>
-        <label>Select File:</label>
-        <input type="file" id="fileInput" name="file" required />
-    </div>
-    <br />
-    <button type="button" id="processBtn">Process File</button>
-</form>
-
-<br />
-<div id="status"></div>
-<br />
-<a id="downloadLink" style="display:none;" download>Download CSV</a>
-
-<script>
-    document.getElementById("processBtn").addEventListener("click", async () => {
-        const fileInput = document.getElementById("fileInput");
-        const status = document.getElementById("status");
-        const downloadLink = document.getElementById("downloadLink");
-
-        if (!fileInput.files.length) {
-            alert("Please select a file first.");
-            return;
-        }
-
-        const formData = new FormData();
-        formData.append("file", fileInput.files[0]);
-
-        status.innerText = "Processing...";
-
-        const response = await fetch("/Home/ProcessFile", {
-            method: "POST",
-            body: formData
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            status.innerText = "Extraction complete!";
-            downloadLink.href = data.csvPath;
-            downloadLink.innerText = "Download CSV";
-            downloadLink.style.display = "inline-block";
-        } else {
-            status.innerText = "Error: " + data.message;
-        }
-    });
-</script>
-
-
-
-
-
-
-
-using Microsoft.AspNetCore.Builder;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-
-var builder = WebApplication.CreateBuilder(args);
-
-// Add MVC services
-builder.Services.AddControllersWithViews();
-
-var app = builder.Build();
-
-// Configure middleware pipeline
-if (!app.Environment.IsDevelopment())
-{
-    app.UseExceptionHandler("/Home/Error");
-    app.UseHsts();
-}
-
-app.UseHttpsRedirection();
-app.UseStaticFiles();
-
-app.UseRouting();
-
-app.UseAuthorization();
-
-// Default route: Home/Index
-app.MapControllerRoute(
-    name: "default",
-    pattern: "{controller=Home}/{action=Index}/{id?}");
-
-app.Run();
-
-
-
-
-
-
-{
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft": "Warning",
-      "Microsoft.Hosting.Lifetime": "Information"
-    }
-  },
-  "AllowedHosts": "*",
-  "Docstrange": {
-    "ApiKey": "c0a36f00-a34c-11f0-b42c-d6fc5c904995",
-    "ModelId": "6990dd9b-45d5-443e-a6e3-a927a97f12a0"
-  }
-}
-
-
-
-[HttpPost]
-public async Task<IActionResult> ProcessFile(IFormFile file)
-{
-    if (file == null || file.Length == 0)
-        return Json(new { success = false, message = "No file uploaded" });
-
-    // Save file locally
-    string uploads = Path.Combine(_env.WebRootPath, "uploads");
-    if (!Directory.Exists(uploads)) Directory.CreateDirectory(uploads);
-    string filePath = Path.Combine(uploads, file.FileName);
-
-    using (var stream = new FileStream(filePath, FileMode.Create))
-    {
-        await file.CopyToAsync(stream);
-    }
-
-    // Read configuration
-    string apiKey = _config["Docstrange:ApiKey"]!;
-    string modelId = _config["Docstrange:ModelId"]!;
-
-    // Nanonets endpoint with model
-    string endpoint = $"https://app.nanonets.com/api/v2/OCR/Model/{modelId}/LabelFile/";
-
-    using var client = new HttpClient();
-
-    var byteArray = Encoding.ASCII.GetBytes($"{apiKey}:");
-    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(byteArray));
-
-    var formData = new MultipartFormDataContent
-    {
-        { new StreamContent(System.IO.File.OpenRead(filePath)), "file", file.FileName }
-    };
-
-    var response = await client.PostAsync(endpoint, formData);
-    string result = await response.Content.ReadAsStringAsync();
-
-    if (!response.IsSuccessStatusCode)
-    {
-        return Json(new { success = false, message = "API Error: " + result });
-    }
-
-    // Save API JSON result into a CSV (structured)
-    string csvPath = Path.Combine(uploads, Path.GetFileNameWithoutExtension(file.FileName) + "_data.csv");
-
-    try
-    {
-        using var jsonDoc = JsonDocument.Parse(result);
-        using var writer = new StreamWriter(csvPath);
-        writer.WriteLine("Label,Value");
-
-        var predictions = jsonDoc.RootElement
-            .GetProperty("result")[0]
-            .GetProperty("prediction");
-
-        foreach (var item in predictions.EnumerateArray())
-        {
-            string label = item.GetProperty("label").GetString() ?? "";
-            string text = item.GetProperty("ocr_text").GetString() ?? "";
-            writer.WriteLine($"\"{label}\",\"{text}\"");
-        }
-    }
-    catch
-    {
-        // fallback: write raw text if structured format fails
-        await System.IO.File.WriteAllTextAsync(csvPath, result);
-    }
-
-    return Json(new { success = true, csvPath = "/uploads/" + Path.GetFileName(csvPath) });
-}
-
-
-
-337793ad-a8d8-11f0-a1f1-729589c37e55
-
-
-
-----
-
-
-
-18a2a85b-2d35-4897-a549-dcb9bfe4ab9b
-0441dd4f-a8e0-11f0-8585-7aa8a5a9630c
-
-
-
-
-
--------+------
-
-
 {
   "Logging": {
     "LogLevel": {
@@ -447,21 +19,36 @@ public async Task<IActionResult> ProcessFile(IFormFile file)
 }
 
 
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
------
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services for MVC
+builder.Services.AddControllersWithViews();
+
+var app = builder.Build();
+
+// Enable static files (for wwwroot)
+app.UseStaticFiles();
+
+// Routing
+app.UseRouting();
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Pdf}/{action=Index}/{id?}");
+
+app.Run();
+
 
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using System.Net.Http.Headers;
 using System.Text.Json;
-using System.Text;
-using System.IO;
-using System.Threading.Tasks;
-using System.Collections.Generic;
 
-namespace YourNamespace.Controllers
+namespace YourProject.Controllers
 {
     public class PdfController : Controller
     {
@@ -485,49 +72,13 @@ namespace YourNamespace.Controllers
             return View();
         }
 
-        // (Rest of the controller stays identical to the previous full version)
-    }
-}
-
-
-
-
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
-using System.Net.Http.Headers;
-using System.Text.Json;
-using System.Text;
-using System.IO;
-using System.Threading.Tasks;
-using System.Collections.Generic;
-
-namespace YourNamespace.Controllers
-{
-    public class PdfController : Controller
-    {
-        private readonly IWebHostEnvironment _env;
-        private readonly string apiKey = "ac726bc1-a8e2-11f0-b43d-26be86793e37";
-        private readonly string instantModelId = "b7d06180-149b-41f6-bfbb-ab981024e8af";
-        private readonly string tableModelId = "dfa41b4e-d52f-4e76-baca-9dff3abe2fc4";
-
-        public PdfController(IWebHostEnvironment env)
-        {
-            _env = env;
-        }
-
-        public IActionResult Index()
-        {
-            return View();
-        }
-
         [HttpPost]
         public async Task<IActionResult> ProcessFile(IFormFile file)
         {
             if (file == null || file.Length == 0)
-                return BadRequest("Please upload a valid file.");
+                return Content("Please upload a valid file.");
 
-            string uploads = Path.Combine(_env.WebRootPath, "Uploads");
+            string uploads = Path.Combine(_env.WebRootPath, uploadFolder);
             if (!Directory.Exists(uploads))
                 Directory.CreateDirectory(uploads);
 
@@ -537,91 +88,102 @@ namespace YourNamespace.Controllers
                 await file.CopyToAsync(stream);
             }
 
-            // Call both models
-            string instantResult = await ExtractDataFromModel(filePath, instantModelId);
-            string tableResult = await ExtractDataFromModel(filePath, tableModelId);
+            string csvPath = Path.Combine(uploads, Path.GetFileNameWithoutExtension(file.FileName) + "_data.csv");
 
-            // Combine into CSV
-            string csvPath = Path.Combine(uploads, Path.GetFileNameWithoutExtension(file.FileName) + "_combined.csv");
-            await GenerateCombinedCSV(instantResult, tableResult, csvPath);
-
-            ViewBag.Message = "File processed successfully!";
-            ViewBag.CSVPath = "/Uploads/" + Path.GetFileName(csvPath);
-
-            return View("Index");
-        }
-
-        private async Task<string> ExtractDataFromModel(string filePath, string modelId)
-        {
-            string apiUrl = $"https://app.nanonets.com/api/v2/OCR/Model/{modelId}/LabelFile/";
             using var client = new HttpClient();
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic",
-                Convert.ToBase64String(Encoding.ASCII.GetBytes(apiKey + ":")));
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Basic",
+                Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{apiKey}:")));
 
-            using var form = new MultipartFormDataContent();
-            form.Add(new StreamContent(System.IO.File.OpenRead(filePath)), "file", Path.GetFileName(filePath));
+            // ---------- Instant Model (text + labels)
+            var instantContent = new MultipartFormDataContent();
+            instantContent.Add(new StreamContent(System.IO.File.OpenRead(filePath)), "file", file.FileName);
+            var instantResponse = await client.PostAsync($"https://app.docstrange.ai/api/models/{instantModelId}/inference/file/", instantContent);
+            var instantJson = await instantResponse.Content.ReadAsStringAsync();
 
-            var response = await client.PostAsync(apiUrl, form);
-            return await response.Content.ReadAsStringAsync();
-        }
+            // ---------- Tables Model
+            var tableContent = new MultipartFormDataContent();
+            tableContent.Add(new StreamContent(System.IO.File.OpenRead(filePath)), "file", file.FileName);
+            var tableResponse = await client.PostAsync($"https://app.docstrange.ai/api/models/{tableModelId}/inference/file/", tableContent);
+            var tableJson = await tableResponse.Content.ReadAsStringAsync();
 
-        private async Task GenerateCombinedCSV(string instantJson, string tableJson, string csvPath)
-        {
-            using var writer = new StreamWriter(csvPath);
-            writer.WriteLine("Label,Value");
-
-            try
+            // ---------- Combine both into one CSV
+            using (var writer = new StreamWriter(csvPath))
             {
-                // -------- Instant model data (text/labels) --------
-                using var instantDoc = JsonDocument.Parse(instantJson);
-                var instantRoot = instantDoc.RootElement.GetProperty("result")[0];
+                writer.WriteLine("Label,Value");
 
-                if (instantRoot.TryGetProperty("prediction", out var predictions))
+                try
                 {
-                    foreach (var item in predictions.EnumerateArray())
+                    using var doc = JsonDocument.Parse(instantJson);
+                    var root = doc.RootElement.GetProperty("result")[0];
+                    if (root.TryGetProperty("prediction", out var preds))
                     {
-                        string label = item.GetProperty("label").GetString() ?? "";
-                        string text = item.GetProperty("ocr_text").GetString() ?? "";
-                        writer.WriteLine($"\"{label}\",\"{text.Replace("\"", "\"\"")}\"");
-                    }
-                }
-
-                // Blank row separator
-                writer.WriteLine();
-                writer.WriteLine("Table,Data");
-
-                // -------- Table model data --------
-                using var tableDoc = JsonDocument.Parse(tableJson);
-                var tableRoot = tableDoc.RootElement.GetProperty("result")[0];
-
-                if (tableRoot.TryGetProperty("tables", out var tables))
-                {
-                    foreach (var table in tables.EnumerateArray())
-                    {
-                        writer.WriteLine();
-                        var rows = table.GetProperty("rows");
-
-                        foreach (var row in rows.EnumerateArray())
+                        foreach (var p in preds.EnumerateArray())
                         {
-                            List<string> cells = new();
-                            foreach (var cell in row.EnumerateArray())
-                            {
-                                string text = cell.GetProperty("text").GetString() ?? "";
-                                cells.Add($"\"{text.Replace("\"", "\"\"")}\"");
-                            }
-                            writer.WriteLine("Table," + string.Join(",", cells));
+                            string label = p.GetProperty("label").GetString() ?? "";
+                            string text = p.GetProperty("ocr_text").GetString() ?? "";
+                            writer.WriteLine($"\"{label}\",\"{text.Replace("\"", "\"\"")}\"");
                         }
                     }
                 }
-                else
+                catch { writer.WriteLine("Error reading instant model data"); }
+
+                writer.WriteLine(); // empty line between sections
+                writer.WriteLine("Table,Table");
+
+                try
                 {
-                    writer.WriteLine("No tables found");
+                    using var doc2 = JsonDocument.Parse(tableJson);
+                    var root2 = doc2.RootElement.GetProperty("result")[0];
+
+                    if (root2.TryGetProperty("tables", out var tables))
+                    {
+                        foreach (var table in tables.EnumerateArray())
+                        {
+                            var rows = table.GetProperty("rows");
+                            foreach (var row in rows.EnumerateArray())
+                            {
+                                List<string> cells = new();
+                                foreach (var cell in row.EnumerateArray())
+                                {
+                                    string text = cell.GetProperty("text").GetString() ?? "";
+                                    cells.Add($"\"{text.Replace("\"", "\"\"")}\"");
+                                }
+                                writer.WriteLine("Table," + string.Join(",", cells));
+                            }
+                        }
+                    }
                 }
+                catch { writer.WriteLine("Error reading table model data"); }
             }
-            catch (Exception ex)
-            {
-                await writer.WriteLineAsync($"Error parsing: {ex.Message}");
-            }
+
+            return File(System.IO.File.OpenRead(csvPath), "text/csv", Path.GetFileName(csvPath));
         }
     }
 }
+
+
+
+@{
+    ViewData["Title"] = "Document Extraction";
+}
+
+<div style="margin:50px auto; width:60%; text-align:center;">
+    <h2>Upload Document for Extraction</h2>
+
+    <form asp-controller="Pdf" asp-action="ProcessFile" enctype="multipart/form-data" method="post">
+        <input type="file" name="file" class="form-control" required style="margin:15px 0;" />
+        <button type="submit" class="btn btn-primary">Process & Download CSV</button>
+    </form>
+
+    <p style="margin-top:20px;color:gray;">
+        Supported formats: PDF, DOCX, PNG, JPG
+    </p>
+</div>
+
+
+
+
+
+
+
