@@ -1,4 +1,122 @@
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
+using YourProject.Models;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 
+namespace YourProject.Controllers
+{
+    public class HomeController : Controller
+    {
+        private readonly IConfiguration _config;
+        private readonly IWebHostEnvironment _env;
+
+        public HomeController(IConfiguration config, IWebHostEnvironment env)
+        {
+            _config = config;
+            _env = env;
+        }
+
+        public IActionResult Index()
+        {
+            return View();
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> ProcessFile(IFormFile file)
+        {
+            if (file == null || file.Length == 0)
+                return Json(new { success = false, message = "No file uploaded" });
+
+            // Save file locally
+            string uploads = Path.Combine(_env.WebRootPath, "uploads");
+            if (!Directory.Exists(uploads)) Directory.CreateDirectory(uploads);
+            string filePath = Path.Combine(uploads, file.FileName);
+
+            using (var stream = new FileStream(filePath, FileMode.Create))
+            {
+                await file.CopyToAsync(stream);
+            }
+
+            // Read configuration
+            string apiKey = _config["Docstrange:ApiKey"]!;
+            string modelId = _config["Docstrange:ModelId"]!;
+            string endpoint = $"https://app.nanonets.com/api/v2/OCR/Model/{modelId}/LabelFile/";
+
+            using var client = new HttpClient();
+
+            // Basic Auth with API Key
+            var byteArray = Encoding.ASCII.GetBytes($"{apiKey}:");
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Basic", Convert.ToBase64String(byteArray));
+
+            // Prepare request
+            var formData = new MultipartFormDataContent
+            {
+                { new StreamContent(System.IO.File.OpenRead(filePath)), "file", file.FileName }
+            };
+
+            // Send to Docstrange API
+            var response = await client.PostAsync(endpoint, formData);
+            string result = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+                return Json(new { success = false, message = "API Error: " + result });
+
+            // Prepare CSV output path
+            string csvPath = Path.Combine(uploads, Path.GetFileNameWithoutExtension(file.FileName) + "_data.csv");
+
+            try
+            {
+                using var jsonDoc = JsonDocument.Parse(result);
+                using var writer = new StreamWriter(csvPath);
+                writer.WriteLine("Section,Label,Value");
+
+                var root = jsonDoc.RootElement.GetProperty("result")[0];
+
+                // --- Handle normal predictions ---
+                if (root.TryGetProperty("prediction", out var predictions))
+                {
+                    foreach (var item in predictions.EnumerateArray())
+                    {
+                        string label = item.GetProperty("label").GetString() ?? "";
+                        string text = item.GetProperty("ocr_text").GetString() ?? "";
+                        writer.WriteLine($"Field,\"{label}\",\"{text.Replace("\"", "\"\"")}\"");
+                    }
+                }
+
+                // --- Handle tables if present ---
+                if (root.TryGetProperty("tables", out var tables))
+                {
+                    foreach (var table in tables.EnumerateArray())
+                    {
+                        writer.WriteLine();
+                        writer.WriteLine("Table,---,---");
+
+                        var rows = table.GetProperty("rows");
+                        foreach (var row in rows.EnumerateArray())
+                        {
+                            List<string> cells = new();
+                            foreach (var cell in row.EnumerateArray())
+                            {
+                                string text = cell.GetProperty("text").GetString() ?? "";
+                                cells.Add($"\"{text.Replace("\"", "\"\"")}\"");
+                            }
+                            writer.WriteLine("Table,," + string.Join(",", cells));
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await System.IO.File.WriteAllTextAsync(csvPath, "Error parsing structured data:\n" + ex.Message + "\n\nRaw response:\n" + result);
+            }
+
+            return Json(new { success = true, csvPath = "/uploads/" + Path.GetFileName(csvPath) });
+        }
+    }
+}
 337793ad-a8d8-11f0-a1f1-729589c37e55
 {
   "Logging": {
