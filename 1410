@@ -195,3 +195,95 @@ app.MapControllerRoute(
     pattern: "{controller=Home}/{action=Index}/{id?}");
 
 app.Run();
+
+
+
+
+
+
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning",
+      "Microsoft.Hosting.Lifetime": "Information"
+    }
+  },
+  "AllowedHosts": "*",
+  "Docstrange": {
+    "ApiKey": "c0a36f00-a34c-11f0-b42c-d6fc5c904995",
+    "ModelId": "6990dd9b-45d5-443e-a6e3-a927a97f12a0"
+  }
+}
+
+
+
+[HttpPost]
+public async Task<IActionResult> ProcessFile(IFormFile file)
+{
+    if (file == null || file.Length == 0)
+        return Json(new { success = false, message = "No file uploaded" });
+
+    // Save file locally
+    string uploads = Path.Combine(_env.WebRootPath, "uploads");
+    if (!Directory.Exists(uploads)) Directory.CreateDirectory(uploads);
+    string filePath = Path.Combine(uploads, file.FileName);
+
+    using (var stream = new FileStream(filePath, FileMode.Create))
+    {
+        await file.CopyToAsync(stream);
+    }
+
+    // Read configuration
+    string apiKey = _config["Docstrange:ApiKey"]!;
+    string modelId = _config["Docstrange:ModelId"]!;
+
+    // Nanonets endpoint with model
+    string endpoint = $"https://app.nanonets.com/api/v2/OCR/Model/{modelId}/LabelFile/";
+
+    using var client = new HttpClient();
+
+    var byteArray = Encoding.ASCII.GetBytes($"{apiKey}:");
+    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(byteArray));
+
+    var formData = new MultipartFormDataContent
+    {
+        { new StreamContent(System.IO.File.OpenRead(filePath)), "file", file.FileName }
+    };
+
+    var response = await client.PostAsync(endpoint, formData);
+    string result = await response.Content.ReadAsStringAsync();
+
+    if (!response.IsSuccessStatusCode)
+    {
+        return Json(new { success = false, message = "API Error: " + result });
+    }
+
+    // Save API JSON result into a CSV (structured)
+    string csvPath = Path.Combine(uploads, Path.GetFileNameWithoutExtension(file.FileName) + "_data.csv");
+
+    try
+    {
+        using var jsonDoc = JsonDocument.Parse(result);
+        using var writer = new StreamWriter(csvPath);
+        writer.WriteLine("Label,Value");
+
+        var predictions = jsonDoc.RootElement
+            .GetProperty("result")[0]
+            .GetProperty("prediction");
+
+        foreach (var item in predictions.EnumerateArray())
+        {
+            string label = item.GetProperty("label").GetString() ?? "";
+            string text = item.GetProperty("ocr_text").GetString() ?? "";
+            writer.WriteLine($"\"{label}\",\"{text}\"");
+        }
+    }
+    catch
+    {
+        // fallback: write raw text if structured format fails
+        await System.IO.File.WriteAllTextAsync(csvPath, result);
+    }
+
+    return Json(new { success = true, csvPath = "/uploads/" + Path.GetFileName(csvPath) });
+}
