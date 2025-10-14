@@ -418,3 +418,210 @@ public async Task<IActionResult> ProcessFile(IFormFile file)
 
 18a2a85b-2d35-4897-a549-dcb9bfe4ab9b
 0441dd4f-a8e0-11f0-8585-7aa8a5a9630c
+
+
+
+
+
+-------+------
+
+
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+
+  "Nanonets": {
+    "ApiKey": "ac726bc1-a8e2-11f0-b43d-26be86793e37",
+    "InstantModelId": "b7d06180-149b-41f6-bfbb-ab981024e8af",
+    "TableModelId": "dfa41b4e-d52f-4e76-baca-9dff3abe2fc4"
+  },
+
+  "FileSettings": {
+    "UploadFolder": "Uploads"
+  }
+}
+
+
+
+-----
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Text;
+using System.IO;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+
+namespace YourNamespace.Controllers
+{
+    public class PdfController : Controller
+    {
+        private readonly IWebHostEnvironment _env;
+        private readonly string apiKey;
+        private readonly string instantModelId;
+        private readonly string tableModelId;
+        private readonly string uploadFolder;
+
+        public PdfController(IWebHostEnvironment env, IConfiguration config)
+        {
+            _env = env;
+            apiKey = config["Nanonets:ApiKey"];
+            instantModelId = config["Nanonets:InstantModelId"];
+            tableModelId = config["Nanonets:TableModelId"];
+            uploadFolder = config["FileSettings:UploadFolder"] ?? "Uploads";
+        }
+
+        public IActionResult Index()
+        {
+            return View();
+        }
+
+        // (Rest of the controller stays identical to the previous full version)
+    }
+}
+
+
+
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Text;
+using System.IO;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+
+namespace YourNamespace.Controllers
+{
+    public class PdfController : Controller
+    {
+        private readonly IWebHostEnvironment _env;
+        private readonly string apiKey = "ac726bc1-a8e2-11f0-b43d-26be86793e37";
+        private readonly string instantModelId = "b7d06180-149b-41f6-bfbb-ab981024e8af";
+        private readonly string tableModelId = "dfa41b4e-d52f-4e76-baca-9dff3abe2fc4";
+
+        public PdfController(IWebHostEnvironment env)
+        {
+            _env = env;
+        }
+
+        public IActionResult Index()
+        {
+            return View();
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> ProcessFile(IFormFile file)
+        {
+            if (file == null || file.Length == 0)
+                return BadRequest("Please upload a valid file.");
+
+            string uploads = Path.Combine(_env.WebRootPath, "Uploads");
+            if (!Directory.Exists(uploads))
+                Directory.CreateDirectory(uploads);
+
+            string filePath = Path.Combine(uploads, Path.GetFileName(file.FileName));
+            using (var stream = new FileStream(filePath, FileMode.Create))
+            {
+                await file.CopyToAsync(stream);
+            }
+
+            // Call both models
+            string instantResult = await ExtractDataFromModel(filePath, instantModelId);
+            string tableResult = await ExtractDataFromModel(filePath, tableModelId);
+
+            // Combine into CSV
+            string csvPath = Path.Combine(uploads, Path.GetFileNameWithoutExtension(file.FileName) + "_combined.csv");
+            await GenerateCombinedCSV(instantResult, tableResult, csvPath);
+
+            ViewBag.Message = "File processed successfully!";
+            ViewBag.CSVPath = "/Uploads/" + Path.GetFileName(csvPath);
+
+            return View("Index");
+        }
+
+        private async Task<string> ExtractDataFromModel(string filePath, string modelId)
+        {
+            string apiUrl = $"https://app.nanonets.com/api/v2/OCR/Model/{modelId}/LabelFile/";
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic",
+                Convert.ToBase64String(Encoding.ASCII.GetBytes(apiKey + ":")));
+
+            using var form = new MultipartFormDataContent();
+            form.Add(new StreamContent(System.IO.File.OpenRead(filePath)), "file", Path.GetFileName(filePath));
+
+            var response = await client.PostAsync(apiUrl, form);
+            return await response.Content.ReadAsStringAsync();
+        }
+
+        private async Task GenerateCombinedCSV(string instantJson, string tableJson, string csvPath)
+        {
+            using var writer = new StreamWriter(csvPath);
+            writer.WriteLine("Label,Value");
+
+            try
+            {
+                // -------- Instant model data (text/labels) --------
+                using var instantDoc = JsonDocument.Parse(instantJson);
+                var instantRoot = instantDoc.RootElement.GetProperty("result")[0];
+
+                if (instantRoot.TryGetProperty("prediction", out var predictions))
+                {
+                    foreach (var item in predictions.EnumerateArray())
+                    {
+                        string label = item.GetProperty("label").GetString() ?? "";
+                        string text = item.GetProperty("ocr_text").GetString() ?? "";
+                        writer.WriteLine($"\"{label}\",\"{text.Replace("\"", "\"\"")}\"");
+                    }
+                }
+
+                // Blank row separator
+                writer.WriteLine();
+                writer.WriteLine("Table,Data");
+
+                // -------- Table model data --------
+                using var tableDoc = JsonDocument.Parse(tableJson);
+                var tableRoot = tableDoc.RootElement.GetProperty("result")[0];
+
+                if (tableRoot.TryGetProperty("tables", out var tables))
+                {
+                    foreach (var table in tables.EnumerateArray())
+                    {
+                        writer.WriteLine();
+                        var rows = table.GetProperty("rows");
+
+                        foreach (var row in rows.EnumerateArray())
+                        {
+                            List<string> cells = new();
+                            foreach (var cell in row.EnumerateArray())
+                            {
+                                string text = cell.GetProperty("text").GetString() ?? "";
+                                cells.Add($"\"{text.Replace("\"", "\"\"")}\"");
+                            }
+                            writer.WriteLine("Table," + string.Join(",", cells));
+                        }
+                    }
+                }
+                else
+                {
+                    writer.WriteLine("No tables found");
+                }
+            }
+            catch (Exception ex)
+            {
+                await writer.WriteLineAsync($"Error parsing: {ex.Message}");
+            }
+        }
+    }
+}
