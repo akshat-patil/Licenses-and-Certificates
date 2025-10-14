@@ -1,3 +1,212 @@
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using System.Net.Http.Headers;
+using System.Text.Json;
+
+namespace YourProject.Controllers
+{
+    public class PdfController : Controller
+    {
+        private readonly IWebHostEnvironment _env;
+        private readonly string apiKey;
+        private readonly string instantModelId;
+        private readonly string tableModelId;
+        private readonly string uploadFolder;
+
+        public PdfController(IWebHostEnvironment env, IConfiguration config)
+        {
+            _env = env;
+            apiKey = config["Nanonets:ApiKey"];
+            instantModelId = config["Nanonets:InstantModelId"];
+            tableModelId = config["Nanonets:TableModelId"];
+            uploadFolder = config["FileSettings:UploadFolder"] ?? "Uploads";
+        }
+
+        public IActionResult Index()
+        {
+            return View();
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> UploadFile(IFormFile file)
+        {
+            if (file == null || file.Length == 0)
+            {
+                ViewBag.Message = "Please select a valid file.";
+                return View("Index");
+            }
+
+            string uploads = Path.Combine(_env.WebRootPath, uploadFolder);
+            if (!Directory.Exists(uploads))
+                Directory.CreateDirectory(uploads);
+
+            string filePath = Path.Combine(uploads, Path.GetFileName(file.FileName));
+            using (var stream = new FileStream(filePath, FileMode.Create))
+                await file.CopyToAsync(stream);
+
+            TempData["UploadedFilePath"] = filePath;
+            TempData["FileName"] = file.FileName;
+            ViewBag.FileName = file.FileName;
+
+            return View("Index");
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> ProcessFile()
+        {
+            var filePath = TempData["UploadedFilePath"] as string;
+            var fileName = TempData["FileName"] as string;
+
+            if (string.IsNullOrEmpty(filePath))
+            {
+                ViewBag.Message = "Please upload a file first.";
+                return View("Index");
+            }
+
+            string uploads = Path.Combine(_env.WebRootPath, uploadFolder);
+            string csvPath = Path.Combine(uploads, Path.GetFileNameWithoutExtension(fileName) + "_data.csv");
+
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Basic",
+                Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{apiKey}:")));
+
+            // 🔹 Instant model
+            var instantContent = new MultipartFormDataContent();
+            instantContent.Add(new StreamContent(System.IO.File.OpenRead(filePath)), "file", fileName);
+            var instantResp = await client.PostAsync($"https://app.docstrange.ai/api/models/{instantModelId}/inference/file/", instantContent);
+            var instantJson = await instantResp.Content.ReadAsStringAsync();
+
+            // 🔹 Tables model
+            var tableContent = new MultipartFormDataContent();
+            tableContent.Add(new StreamContent(System.IO.File.OpenRead(filePath)), "file", fileName);
+            var tableResp = await client.PostAsync($"https://app.docstrange.ai/api/models/{tableModelId}/inference/file/", tableContent);
+            var tableJson = await tableResp.Content.ReadAsStringAsync();
+
+            // 🔹 Write combined CSV
+            using (var writer = new StreamWriter(csvPath))
+            {
+                writer.WriteLine("Label,Value");
+                try
+                {
+                    using var doc = JsonDocument.Parse(instantJson);
+                    var root = doc.RootElement.GetProperty("result")[0];
+                    if (root.TryGetProperty("prediction", out var preds))
+                    {
+                        foreach (var p in preds.EnumerateArray())
+                        {
+                            string label = p.GetProperty("label").GetString() ?? "";
+                            string text = p.GetProperty("ocr_text").GetString() ?? "";
+                            writer.WriteLine($"\"{label}\",\"{text.Replace("\"", "\"\"")}\"");
+                        }
+                    }
+                }
+                catch { writer.WriteLine("Error parsing text data"); }
+
+                writer.WriteLine();
+                writer.WriteLine("Table,Table");
+
+                try
+                {
+                    using var doc2 = JsonDocument.Parse(tableJson);
+                    var root2 = doc2.RootElement.GetProperty("result")[0];
+
+                    if (root2.TryGetProperty("tables", out var tables))
+                    {
+                        foreach (var table in tables.EnumerateArray())
+                        {
+                            var rows = table.GetProperty("rows");
+                            foreach (var row in rows.EnumerateArray())
+                            {
+                                List<string> cells = new();
+                                foreach (var cell in row.EnumerateArray())
+                                {
+                                    string text = cell.GetProperty("text").GetString() ?? "";
+                                    cells.Add($"\"{text.Replace("\"", "\"\"")}\"");
+                                }
+                                writer.WriteLine("Table," + string.Join(",", cells));
+                            }
+                        }
+                    }
+                }
+                catch { writer.WriteLine("Error parsing table data"); }
+            }
+
+            TempData["CsvFilePath"] = csvPath;
+            TempData["CsvFileName"] = Path.GetFileName(csvPath);
+
+            ViewBag.FileProcessed = true;
+            ViewBag.FileName = fileName;
+            ViewBag.CsvFileName = Path.GetFileName(csvPath);
+
+            return View("Index");
+        }
+
+        [HttpGet]
+        public IActionResult DownloadCsv(string fileName)
+        {
+            if (string.IsNullOrEmpty(fileName))
+                return NotFound();
+
+            string filePath = Path.Combine(_env.WebRootPath, uploadFolder, fileName);
+            if (!System.IO.File.Exists(filePath))
+                return NotFound();
+
+            return File(System.IO.File.OpenRead(filePath), "text/csv", fileName);
+        }
+    }
+}
+
+
+
+
+
+
+@{
+    ViewData["Title"] = "Document Extractor";
+}
+
+<div style="margin:40px auto; width:60%; text-align:center;">
+    <h2>Document Extractor using Docstrange API</h2>
+
+    <form asp-action="UploadFile" asp-controller="Pdf" enctype="multipart/form-data" method="post">
+        <input type="file" name="file" required class="form-control" style="margin:15px 0;" />
+        <button type="submit" class="btn btn-primary">Upload</button>
+    </form>
+
+    @if (ViewBag.FileName != null)
+    {
+        <div style="margin-top:20px;">
+            <p><strong>Uploaded:</strong> @ViewBag.FileName</p>
+
+            <form asp-action="ProcessFile" asp-controller="Pdf" method="post">
+                <button type="submit" class="btn btn-success">Process File</button>
+            </form>
+        </div>
+    }
+
+    @if (ViewBag.FileProcessed == true)
+    {
+        <div style="margin-top:20px;">
+            <p>✅ File processed successfully!</p>
+            <a class="btn btn-info" href="@Url.Action("DownloadCsv", "Pdf", new { fileName = ViewBag.CsvFileName })">Download CSV</a>
+        </div>
+    }
+
+    @if (ViewBag.Message != null)
+    {
+        <div style="color:red;margin-top:15px;">
+            @ViewBag.Message
+        </div>
+    }
+</div>
+
+
+
+
+
+
 {
   "Logging": {
     "LogLevel": {
