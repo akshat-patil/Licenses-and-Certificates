@@ -1,0 +1,123 @@
+// Replace Windows.Forms.Timer with a background System.Timers.Timer
+private System.Timers.Timer timerDownload = new System.Timers.Timer();
+private DataTable downloadDataTable = new DataTable();
+private bool isCollectingData = false;
+private readonly object _downloadLock = new object(); // prevent overlapping captures
+
+--------
+int vIntervalMinutes = Convert.ToInt32(cmbInterval.SelectedItem.ToString());
+timerDownload.Interval = vIntervalMinutes * 60 * 1000; // minutes -> ms
+timerDownload.AutoReset = true;
+timerDownload.Elapsed -= TimerDownload_Elapsed; // ensure no duplicate handlers
+timerDownload.Elapsed += TimerDownload_Elapsed;
+timerDownload.Start();
+
+isCollectingData = true;
+lblStatus.Text = $"Data Collection started at {DateTime.Now:HH:mm:ss}";
+
+btnLoginStarted.Enabled = false;
+btnLoginStarted.BackColor = Color.Gray;
+
+--------
+
+private void TimerDownload_Elapsed(object sender, System.Timers.ElapsedEventArgs e)
+{
+    // Prevent overlapping elapsed events if the previous capture is still running
+    if (!Monitor.TryEnter(_downloadLock))
+        return;
+
+    try
+    {
+        // We need to access UI controls (labels) and call UI methods:
+        // Marshal to UI thread using BeginInvoke so we do not block the timer thread.
+        // Using BeginInvoke queues the work to the UI thread and returns immediately.
+        // That preserves timer accuracy while keeping UI-access safe.
+        this.BeginInvoke(new Action(() =>
+        {
+            try
+            {
+                if (rdoSystem.Checked)
+                    getAvgMeasurementData();
+                else
+                    getMeasurementData();
+
+                // PopulateDownloadDataRow reads many lbl* controls - safe on UI thread
+                PopulateDownloadDataRow();
+
+                lblStatus.Text = $"Data logged at {DateTime.Now:HH:mm:ss}";
+            }
+            catch (Exception exUi)
+            {
+                // Optional: log or set status
+                lblStatus.Text = "Error during data capture: " + exUi.Message;
+            }
+        }));
+    }
+    finally
+    {
+        Monitor.Exit(_downloadLock);
+    }
+}
+
+-------
+
+private void btnDownload_Click(object sender, EventArgs e)
+{
+    try
+    {
+        // ✅ 1. Stop any ongoing data collection before export
+        if (timerDownload != null)
+        {
+            try
+            {
+                timerDownload.Stop();
+                timerDownload.Dispose();
+
+                // Recreate a fresh timer for next session
+                timerDownload = new System.Timers.Timer();
+            }
+            catch (Exception exTimer)
+            {
+                MessageBox.Show("Error stopping timer: " + exTimer.Message, 
+                                "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        isCollectingData = false;
+
+        // ✅ 2. Check if there’s data to export
+        if (downloadDataTable == null || downloadDataTable.Rows.Count == 0)
+        {
+            MessageBox.Show("No data available to download.", 
+                            "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        // ✅ 3. Choose the save location
+        SaveFileDialog saveDialog = new SaveFileDialog();
+        saveDialog.Filter = "Excel Files (*.xlsx)|*.xlsx";
+        saveDialog.FileName = "DataLog_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".xlsx";
+
+        if (saveDialog.ShowDialog() == DialogResult.OK)
+        {
+            // ✅ 4. Use your existing ExcelUtility to export
+            ExcelUtility excelUtil = new ExcelUtility();
+            excelUtil.WriteDataTableToExcel(downloadDataTable, "DataLog", saveDialog.FileName);
+
+            MessageBox.Show("Data successfully downloaded to:\n" + saveDialog.FileName, 
+                            "Download Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ✅ 5. Reset UI elements
+        downloadDataTable.Rows.Clear();
+        btnLoginStarted.Enabled = true;
+        btnLoginStarted.BackColor = Color.LightGreen;
+        lblStatus.Text = "Data collection stopped and exported successfully.";
+    }
+    catch (Exception ex)
+    {
+        MessageBox.Show("Error while downloading data: " + ex.Message, 
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+}
+
