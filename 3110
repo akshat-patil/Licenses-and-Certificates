@@ -120,4 +120,5 @@ private void btnDownload_Click(object sender, EventArgs e)
                         "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 }
-
+---------
+excelUtil.WriteDataTableToExcel(downloadDataTable, "DataLog", saveDialog.FileName, "Modbus Data Log");
