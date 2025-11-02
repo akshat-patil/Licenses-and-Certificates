@@ -86,3 +86,68 @@ private void frmMain_FormClosing(object sender, FormClosingEventArgs e)
     }
     catch { }
 }
+
+
+
+private void btnDownload_Click(object sender, EventArgs e)
+{
+    try
+    {
+        // ✅ Stop timer before export
+        if (timerDownload != null)
+        {
+            try
+            {
+                timerDownload.Stop();
+                timerDownload.Dispose();
+                timerDownload = new System.Timers.Timer(); // recreate so you can start again later
+            }
+            catch (Exception exTimer)
+            {
+                MessageBox.Show("Error stopping timer: " + exTimer.Message,
+                                "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        isCollectingData = false;
+
+        // ⚙️ Restore system’s normal sleep behavior now that logging stopped
+        SetThreadExecutionState(ES_CONTINUOUS);
+
+        // ✅ Check if data available
+        if (downloadDataTable == null || downloadDataTable.Rows.Count == 0)
+        {
+            MessageBox.Show("No data available to download.",
+                            "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        // ✅ Choose save location
+        SaveFileDialog saveDialog = new SaveFileDialog();
+        saveDialog.Filter = "Excel Files (*.xlsx)|*.xlsx";
+        saveDialog.FileName = "DataLog_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".xlsx";
+
+        if (saveDialog.ShowDialog() == DialogResult.OK)
+        {
+            // ✅ Create Excel export object
+            ExcelUtlity excelUtil = new ExcelUtlity();
+
+            // ✅ Call with 4 parameters (fixes your earlier error)
+            excelUtil.WriteDataTableToExcel(downloadDataTable, "DataLog", saveDialog.FileName, "Modbus Data Log");
+
+            MessageBox.Show("Data successfully downloaded to:\n" + saveDialog.FileName,
+                            "Download Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ✅ Reset UI elements
+        downloadDataTable.Rows.Clear();
+        btnLoginStarted.Enabled = true;
+        btnLoginStarted.BackColor = Color.LightGreen;
+        lblStatus.Text = "Data collection stopped and exported successfully.";
+    }
+    catch (Exception ex)
+    {
+        MessageBox.Show("Error while downloading data: " + ex.Message,
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+}
