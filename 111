@@ -1,0 +1,88 @@
+// --- Prevent system sleep while logging is active (Win32) ---
+[DllImport("kernel32.dll", SetLastError = true)]
+private static extern uint SetThreadExecutionState(uint esFlags);
+
+private const uint ES_CONTINUOUS = 0x80000000;
+private const uint ES_SYSTEM_REQUIRED = 0x00000001;
+private const uint ES_DISPLAY_REQUIRED = 0x00000002;
+
+
+
+
+
+
+_____
+
+
+
+
+int vIntervalMinutes = Convert.ToInt32(cmbInterval.SelectedItem.ToString());
+timerDownload.Interval = vIntervalMinutes * 60 * 1000; // minutes -> ms
+timerDownload.AutoReset = true;
+timerDownload.Elapsed -= TimerDownload_Elapsed;
+timerDownload.Elapsed += TimerDownload_Elapsed;
+
+// Prevent system from sleeping while logging is active
+SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+
+// Start background timer
+timerDownload.Start();
+
+isCollectingData = true;
+lblStatus.Text = $"Data Collection started at {DateTime.Now:HH:mm:ss}";
+
+btnLoginStarted.Enabled = false;
+btnLoginStarted.BackColor = Color.Gray;
+
+
+
+
+______
+
+
+
+
+try
+{
+    if (timerDownload != null)
+    {
+        timerDownload.Stop();
+        timerDownload.Dispose();
+        timerDownload = new System.Timers.Timer();
+    }
+}
+catch { /* ignore stop errors */ }
+
+isCollectingData = false;
+
+// Allow system to go to sleep again (clear the previous execution state)
+SetThreadExecutionState(ES_CONTINUOUS);
+
+btnLoginStarted.Enabled = true;
+btnLoginStarted.BackColor = Color.LightGreen;
+
+
+
+
+
+___________
+
+
+
+
+private void frmMain_FormClosing(object sender, FormClosingEventArgs e)
+{
+    try
+    {
+        // restore normal sleep behavior
+        SetThreadExecutionState(ES_CONTINUOUS);
+
+        if (timerDownload != null)
+        {
+            timerDownload.Stop();
+            timerDownload.Dispose();
+            timerDownload = null;
+        }
+    }
+    catch { }
+}
