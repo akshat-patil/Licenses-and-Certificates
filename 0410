@@ -1,0 +1,38 @@
+private void ShowHideTaxColumns(bool vShowBase, bool vShowAssetsExtra, bool vShowRMExtra)
+{
+    // --- Columns after DifferentialCustomDutyReversal ---
+
+    // For Assets category (9 extra)
+    SetColumnVisibility("DocumentNo", vShowAssetsExtra);
+    SetColumnVisibility("ITCAvailed", vShowAssetsExtra);
+    SetColumnVisibility("Day1", vShowAssetsExtra);
+    SetColumnVisibility("Month1", vShowAssetsExtra);
+    SetColumnVisibility("Year1", vShowAssetsExtra);
+    SetColumnVisibility("Quarter1", vShowAssetsExtra);
+    SetColumnVisibility("Rule446", vShowAssetsExtra);
+    SetColumnVisibility("Rule40", vShowAssetsExtra);
+    SetColumnVisibility("ITCReverseSection186", vShowAssetsExtra);
+
+    // For RM category (4 extra)
+    SetColumnVisibility("RMCostPerPiece", vShowRMExtra);
+    SetColumnVisibility("RMValue", vShowRMExtra);
+    SetColumnVisibility("LocalRM", vShowRMExtra);
+    SetColumnVisibility("ImportRM", vShowRMExtra);
+}
+
+
+
+private void SetColumnVisibility(string vColumnHeaderText, bool vVisible)
+{
+    foreach (DataControlField oColumn in grd.Columns)
+    {
+        if (oColumn.HeaderText.Equals(vColumnHeaderText, StringComparison.OrdinalIgnoreCase))
+        {
+            oColumn.Visible = vVisible;
+            break;
+        }
+    }
+}
+
+
+
