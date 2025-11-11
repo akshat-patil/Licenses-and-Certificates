@@ -1,0 +1,90 @@
+<td id="tdChargeReversalLabel" runat="server" style="text-align: right;">
+  <label>Charge to P/L (-) Reversal<br/>of Input Tax Credit (ITC) :</label>
+</td>
+<td id="tdChargeReversalField" runat="server">
+  <asp:TextBox ID="txtChargeReversalInputTaxCredit1" runat="server" class="form-control" Style="text-align: center;" MaxLength="50" TextMode="Number"></asp:TextBox>
+</td>
+
+
+private void ShowHideSingleFields()
+{
+    string vCategory = lblCategory.Text.Trim().ToLower();
+    string vSubCategory = lblSubCategory.Text.Trim().ToLower();
+
+    // First, hide everything you may want to conditionally show
+    tdChargeReversalLabel.Visible = false;
+    tdChargeReversalField.Visible = false;
+
+    tdDifferentialCustomDutyLabel.Visible = false;
+    tdDifferentialCustomDutyField.Visible = false;
+
+    tdImportRMLabel.Visible = false;
+    tdImportRMField.Visible = false;
+
+    tdLocalRMLabel.Visible = false;
+    tdLocalRMField.Visible = false;
+
+    tdDocumentNoLabel.Visible = false;
+    tdDocumentNoField.Visible = false;
+
+    tdITCAvailedLabel.Visible = false;
+    tdITCAvailedField.Visible = false;
+
+    // add all td IDs here that you want to manage...
+    // -----------------------------------------------------------------
+    // Now set visibility rules (example rules based on your clmShow logic)
+    if (vSubCategory == "rm")
+    {
+        // show RM related fields
+        tdChargeReversalLabel.Visible = tdChargeReversalField.Visible = true;
+        tdDifferentialCustomDutyLabel.Visible = tdDifferentialCustomDutyField.Visible = true;
+        tdImportRMLabel.Visible = tdImportRMField.Visible = true;
+        tdLocalRMLabel.Visible = tdLocalRMField.Visible = true;
+        tdITCAvailedLabel.Visible = tdITCAvailedField.Visible = true;
+        tdDocumentNoLabel.Visible = tdDocumentNoField.Visible = true;
+        // show any other RM-specific fields...
+    }
+    else if (vCategory == "assets")
+    {
+        // assets: show most/all fields
+        tdChargeReversalLabel.Visible = tdChargeReversalField.Visible = true;
+        tdDifferentialCustomDutyLabel.Visible = tdDifferentialCustomDutyField.Visible = true;
+        tdImportRMLabel.Visible = tdImportRMField.Visible = true;
+        tdLocalRMLabel.Visible = tdLocalRMField.Visible = true;
+        tdITCAvailedLabel.Visible = tdITCAvailedField.Visible = true;
+        tdDocumentNoLabel.Visible = tdDocumentNoField.Visible = true;
+        // set other asset-specific fields...
+    }
+    else
+    {
+        // default: show baseline fields (same as clmShow default)
+        tdChargeReversalLabel.Visible = tdChargeReversalField.Visible = true;
+        // and possibly show only some others
+        tdDocumentNoLabel.Visible = tdDocumentNoField.Visible = true;
+        // etc.
+    }
+}
+
+
+
+
+
+private void bindSingleRecordData()
+{
+    try
+    {
+        // existing code that loads fields into txtMaterial1, txt... etc.
+        ...
+        // after you finish loading values
+        ShowHideSingleFields();   // <<< NEW: set visibility based on category/subcategory
+
+        vExists(hdnsntid.Value, "btnN");
+        vExists(hdnsntid.Value, "btnP");
+    }
+    catch (Exception oException)
+    {
+        ...
+    }
+}
+
+
