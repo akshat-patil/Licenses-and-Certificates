@@ -1,0 +1,495 @@
+private async void getMeasurementData()
+{
+    try
+    {
+        timerMeasurement.Enabled = false;
+        string NoOfModule = "1";
+        if (drpBasicModules.SelectedItem != null)
+            NoOfModule = drpBasicModules.SelectedItem.ToString();
+
+        // Run blocking Modbus read on background thread
+        var readResult = await Task.Run(() =>
+        {
+            short[] values = new short[144];
+            bool oRead = mb.SendFc3(Convert.ToByte(NoOfModule), Convert.ToUInt16(1), 144, Convert.ToByte(4), ref values);
+            return new { oRead, values };
+        });
+
+        if (!readResult.oRead || !mb.modbusStatus.Equals("Read successful"))
+        {
+            this.BeginInvoke(new Action(() =>
+            {
+                // set status and move to settings tab (non-blocking)
+                lblStatus.Text = "Modbus error: " + mb.modbusStatus;
+                tabMain.SelectedIndex = 2;
+                tabSetting.SelectedIndex = 2;
+            }));
+            timerMeasurement.Enabled = true;
+            timerMeasurement.Interval = Convert.ToInt16(txtDelay.Text);
+            return;
+        }
+
+        // Now update UI once using BeginInvoke
+        this.BeginInvoke(new Action(() =>
+        {
+            try
+            {
+                tableLayoutPanel1.SuspendLayout();
+                tableLayoutPanel2.SuspendLayout();
+                tableLayoutPanel3.SuspendLayout();
+
+                for (int i = 0; i < readResult.values.Length - 1; i++)
+                {
+                    string oResult = "0";
+                    try
+                    {
+                        int intValue = (int)readResult.values[2 * i];
+                        intValue <<= 16;
+                        intValue += (int)readResult.values[2 * i + 1];
+                        oResult = (BitConverter.ToSingle(BitConverter.GetBytes(intValue), 0)).ToString();
+                        oResult = DoFormat(Convert.ToDouble(oResult));
+                    }
+                    catch { }
+
+                    // update labels (same mapping as before)
+                    if (i.Equals(0)) lblmRLoadCurrent.Text = oResult;
+                    else if (i.Equals(1)) lblYLoadCurrent.Text = oResult;
+                    else if (i.Equals(2)) lblBLoadCurrent.Text = oResult;
+                    else if (i.Equals(3)) lblRLoadcos.Text = oResult;
+                    else if (i.Equals(4)) lblYLoadcos.Text = oResult;
+                    else if (i.Equals(5)) lblBLoadcos.Text = oResult;
+                    else if (i.Equals(6)) lblmRLoadCurrentTHD.Text = oResult;
+                    else if (i.Equals(7)) lblYLoadCurrentTHD.Text = oResult;
+                    else if (i.Equals(8)) lblBLoadCurrentTHD.Text = oResult;
+                    else if (i.Equals(9)) lblRGridVoltage.Text = oResult;
+                    else if (i.Equals(10)) lblYGridVoltage.Text = oResult;
+                    else if (i.Equals(11)) lblBGridVoltage.Text = oResult;
+                    else if (i.Equals(12)) lblFrequency.Text = oResult;
+                    else if (i.Equals(15)) lblMRGridVoltageTHD.Text = oResult;
+                    else if (i.Equals(16)) lblYGridVoltageTHD.Text = oResult;
+                    else if (i.Equals(17)) lblBGridVoltageTHD.Text = oResult;
+                    else if (i.Equals(18)) lblmRAHFCurrent.Text = oResult;
+                    else if (i.Equals(19)) lblYAHFCurrent.Text = oResult;
+                    // ... continue the same label assignments as original for indices you had
+                }
+
+            }
+            finally
+            {
+                tableLayoutPanel1.ResumeLayout();
+                tableLayoutPanel2.ResumeLayout();
+                tableLayoutPanel3.ResumeLayout();
+            }
+
+            timerMeasurement.Enabled = true;
+            timerMeasurement.Interval = Convert.ToInt16(txtDelay.Text);
+        }));
+    }
+    catch (Exception ex)
+    {
+        this.BeginInvoke(new Action(() =>
+        {
+            timerMeasurement.Enabled = false;
+            lblStatus.Text = "Error : " + ex.Message;
+            tabMain.SelectedIndex = 2;
+            tabSetting.SelectedIndex = 2;
+        }));
+    }
+}
+
+
+-----
+
+private async void getAvgMeasurementData()
+{
+    try
+    {
+        timerMeasurement.Enabled = false;
+
+        if (String.IsNullOrEmpty(vNoOfModule))
+        {
+            // do a single read via getMeasurementData fallback
+            getMeasurementData();
+            return;
+        }
+
+        int modules = Convert.ToInt16(vNoOfModule);
+        // Accumulator for values
+        double[] accum = new double[144];
+
+        bool anyReadFailed = false;
+
+        await Task.Run(() =>
+        {
+            for (int j = 1; j <= modules; j++)
+            {
+                short[] values = new short[144];
+                bool oRead = mb.SendFc3(Convert.ToByte(j), 0001, 144, Convert.ToByte(4), ref values);
+                if (!oRead || !mb.modbusStatus.Equals("Read successful"))
+                {
+                    anyReadFailed = true;
+                    break;
+                }
+
+                for (int i = 0; i < values.Length - 1; i++)
+                {
+                    try
+                    {
+                        int intValue = (int)values[2 * i];
+                        intValue <<= 16;
+                        intValue += (int)values[2 * i + 1];
+                        float f = BitConverter.ToSingle(BitConverter.GetBytes(intValue), 0);
+                        accum[i] += f;
+                    }
+                    catch { }
+                }
+            }
+        });
+
+        if (anyReadFailed)
+        {
+            this.BeginInvoke(new Action(() =>
+            {
+                lblStatus.Text = "Modbus read failed during averaging: " + mb.modbusStatus;
+                // fallback to single module read
+                getMeasurementData();
+            }));
+            timerMeasurement.Enabled = true;
+            timerMeasurement.Interval = Convert.ToInt16(txtDelay.Text);
+            return;
+        }
+
+        // Update UI with averaged values
+        this.BeginInvoke(new Action(() =>
+        {
+            tableLayoutPanel1.SuspendLayout();
+            tableLayoutPanel2.SuspendLayout();
+            tableLayoutPanel3.SuspendLayout();
+
+            for (int i = 0; i < accum.Length - 1; i++)
+            {
+                string oResult = "0";
+                try
+                {
+                    double avg = accum[i] / modules;
+                    oResult = DoFormat(Convert.ToDouble(avg));
+                }
+                catch { }
+
+                // update same labels as getMeasurementData but use averaged values
+                if (i.Equals(0)) lblmRLoadCurrent.Text = oResult;
+                else if (i.Equals(1)) lblYLoadCurrent.Text = oResult;
+                else if (i.Equals(2)) lblBLoadCurrent.Text = oResult;
+                // ... copy the rest of mapping
+            }
+
+            tableLayoutPanel1.ResumeLayout();
+            tableLayoutPanel2.ResumeLayout();
+            tableLayoutPanel3.ResumeLayout();
+
+            timerMeasurement.Enabled = true;
+            timerMeasurement.Interval = Convert.ToInt16(txtDelay.Text);
+        }));
+    }
+    catch (Exception ex)
+    {
+        this.BeginInvoke(new Action(() =>
+        {
+            timerMeasurement.Enabled = false;
+            lblStatus.Text = "Error : " + ex.Message;
+            tabMain.SelectedIndex = 2;
+            tabSetting.SelectedIndex = 2;
+        }));
+    }
+}
+
+
+
+----------
+
+
+private async void getMainData()
+{
+    try
+    {
+        timerMain.Enabled = false;
+
+        var read = await Task.Run(() =>
+        {
+            short[] values = new short[144];
+            bool oRead = mb.SendFc3(Convert.ToByte(1), 0001, 144, Convert.ToByte(4), ref values);
+            return new { oRead, values };
+        });
+
+        if (!read.oRead || !mb.modbusStatus.Equals("Read successful"))
+        {
+            this.BeginInvoke(new Action(() =>
+            {
+                lblStatus.Text = "Modbus error: " + mb.modbusStatus;
+                tabMain.SelectedIndex = 2;
+                tabSetting.SelectedIndex = 2;
+            }));
+            timerMain.Enabled = true;
+            return;
+        }
+
+        this.BeginInvoke(new Action(() =>
+        {
+            try
+            {
+                for (int i = 0; i < read.values.Length - 1; i++)
+                {
+                    string oResult = "0";
+                    try
+                    {
+                        int intValue = (int)read.values[2 * i];
+                        intValue <<= 16;
+                        intValue += (int)read.values[2 * i + 1];
+                        oResult = (BitConverter.ToSingle(BitConverter.GetBytes(intValue), 0)).ToString();
+                        oResult = DoFormat(Convert.ToDouble(oResult));
+                    }
+                    catch { }
+
+                    if (i.Equals(0)) lblRLoadCurrent.Text = oResult;
+                    else if (i.Equals(6)) lblRLoadCurrentTHD.Text = oResult;
+                    else if (i.Equals(15)) lblRGridVoltageTHD.Text = oResult;
+                    else if (i.Equals(18)) lblRAHFCurrent.Text = oResult;
+                    else if (i.Equals(24)) lblRGridCurrent.Text = oResult;
+                    else if (i.Equals(30)) lblRGridCurrentTHD.Text = oResult;
+                    // continue any other mappings you had
+                }
+            }
+            finally
+            {
+                timerMain.Enabled = true;
+            }
+        }));
+    }
+    catch (Exception ex)
+    {
+        this.BeginInvoke(new Action(() =>
+        {
+            timerMain.Enabled = false;
+            lblStatus.Text = "Error : " + ex.Message;
+            tabMain.SelectedIndex = 2;
+            tabSetting.SelectedIndex = 2;
+        }));
+    }
+}
+
+
+
+---------
+
+
+private async void readEmergencyTrip()
+{
+    try
+    {
+        timerMain.Enabled = false;
+
+        var read = await Task.Run(() =>
+        {
+            int[] values = new int[44];
+            bool oRead = mb.SendFc3New(Convert.ToByte(1), 8193, 44, Convert.ToByte(3), ref values);
+            return new { oRead, values };
+        });
+
+        if (!read.oRead || !mb.modbusStatus.Equals("Read successful"))
+        {
+            this.BeginInvoke(new Action(() => { timerMain.Enabled = true; }));
+            return;
+        }
+
+        this.BeginInvoke(new Action(() =>
+        {
+            try
+            {
+                for (int i = 0; i < read.values.Length - 1; i++)
+                {
+                    string oResult = "0";
+                    try
+                    {
+                        int intValue = (int)read.values[2 * i];
+                        intValue <<= 16;
+                        intValue += (int)read.values[2 * i + 1];
+                        oResult = (BitConverter.ToSingle(BitConverter.GetBytes(intValue), 0)).ToString();
+                        oResult = DoFormat(Convert.ToDouble(oResult));
+                    }
+                    catch { }
+
+                    if (i.Equals(21))
+                    {
+                        if (Convert.ToInt16(oResult).Equals(0)) btnEmergency.BackColor = Color.Red;
+                        else btnEmergency.BackColor = Color.LawnGreen;
+                    }
+                }
+            }
+            finally { timerMain.Enabled = true; }
+        }));
+    }
+    catch (Exception ex)
+    {
+        this.BeginInvoke(new Action(() =>
+        {
+            timerMain.Enabled = false;
+            lblStatus.Text = "Error : " + ex.Message;
+            tabMain.SelectedIndex = 2;
+            tabSetting.SelectedIndex = 2;
+        }));
+    }
+}
+
+
+
+--------
+
+private void timerMeasurement_Tick(object sender, EventArgs e)
+{
+    if (rdoModules.Checked)
+        getMeasurementData();
+    else if (rdoSystem.Checked)
+        getAvgMeasurementData();
+}
+
+
+
+---------
+
+
+
+private void timerRecord_Tick(object sender, EventArgs e)
+{
+    lblModule1.Text = string.Empty;
+    lblModule2.Text = string.Empty;
+    lblModule3.Text = string.Empty;
+    lblModule4.Text = string.Empty;
+    lblModule5.Text = string.Empty;
+    lblModule6.Text = string.Empty;
+    lblModule7.Text = string.Empty;
+    lblModule8.Text = string.Empty;
+    lblModule9.Text = string.Empty;
+    lblModule10.Text = string.Empty;
+    if (isConnected)
+        recordTab(); // recordTab will be updated next
+}
+
+
+
+--------
+
+
+private async void recordTab()
+{
+    timerRecord.Enabled = false;
+    if (String.IsNullOrEmpty(vNoOfModule)) { vNoOfModule = "1"; }
+
+    int modules = Convert.ToInt16(vNoOfModule);
+    var results = new List<(int moduleIndex, List<string> rowItems)>();
+
+    // Run the per-module reads on background thread
+    await Task.Run(() =>
+    {
+        for (int j = 1; j <= modules; j++)
+        {
+            string oModule = string.Empty;
+            string Alarm = string.Empty;
+            ushort[] values = new ushort[20];
+            bool oRead = mb.SendFc3New(Convert.ToByte(j), 0, 20, Convert.ToByte(2), ref values);
+            if (!oRead || !mb.modbusStatus.Equals("Read successful"))
+            {
+                continue;
+            }
+
+            var rowItems = new List<string>();
+            for (int i = 0; i < values.Length - 1; i++)
+            {
+                string oResult = string.Empty;
+                try { oResult = values[i].ToString(); } catch { }
+
+                if (i.Equals(0)) oModule = "ModuleNo" + oResult;
+                if (i.Equals(3))
+                {
+                    switch (oResult)
+                    {
+                        case "0": Alarm = ""; break;
+                        case "1": Alarm = "Reserved"; break;
+                        case "2": Alarm = "Module Status (0,1)"; break;
+                        case "3": Alarm = "Communication status (0,1)"; break;
+                        default: Alarm = ""; break;
+                    }
+                }
+                // collect values needed for UI
+                rowItems.Add(oResult);
+            }
+            results.Add((j, rowItems));
+        }
+    });
+
+    // Update UI in one pass
+    this.BeginInvoke(new Action(() =>
+    {
+        try
+        {
+            dgActiveRecords.SuspendLayout();
+            // clear and refill dgActiveRecords or update labels accordingly
+            dgActiveRecords.Rows.Clear();
+            foreach (var res in results)
+            {
+                // adapt columns/values as per original mapping; minimal example:
+                int idx = dgActiveRecords.Rows.Add();
+                dgActiveRecords.Rows[idx].Cells[0].Value = DateTime.Now.ToString("HH:mm:ss");
+                dgActiveRecords.Rows[idx].Cells[1].Value = "Module " + res.moduleIndex;
+                dgActiveRecords.Rows[idx].Cells[2].Value = "Identity";
+                dgActiveRecords.Rows[idx].Cells[3].Value = "Freq";
+            }
+        }
+        finally
+        {
+            dgActiveRecords.ResumeLayout();
+            timerRecord.Enabled = true;
+        }
+    }));
+}
+
+
+
+--------
+
+ExcelUtlity oExcelUtil = new ExcelUtlity();
+var oSheetData = new Dictionary<string, DataTable>
+{
+    { "Measurements", oDownloadDataTable },
+    { "Alarms", oHistoryDataTable } 
+};
+
+// run Excel write on background thread
+bool bResult = await Task.Run(() =>
+{
+    try
+    {
+        return oExcelUtil.WriteMultipleSheetsToExcel(oSheetData, vSaveAsLocation);
+    }
+    catch
+    {
+        return false;
+    }
+});
+
+if (bResult)
+{
+    MessageBox.Show("Data successfully downloaded to:\n" + vSaveAsLocation,
+                    "Download Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+}
+else
+{
+    MessageBox.Show("Failed to export data.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+}
+
+
+
+-------
+
+using System.Threading.Tasks;
+using System.Collections.Generic;
+
