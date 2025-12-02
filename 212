@@ -20,6 +20,47 @@
 
 
 
+
+
+
+
+<style>
+    .topbar {
+        padding: 20px; 
+        display: flex; 
+        align-items: center; 
+        gap: 25px; 
+        font-family: 'Segoe UI', Arial, sans-serif;
+    }
+
+    .tabs {
+        display: flex; 
+        gap: 25px; 
+        font-size: 18px; 
+        font-weight: bold;
+    }
+
+    .tabs a {
+        text-decoration: none; 
+        color: black;
+    }
+</style>
+
+<div class="topbar">
+    <img src="Req/logo.png" height="60" width="50" />
+
+    <a href="https://your-link.com">
+        <img src="Req/second.png" height="60" width="50" />
+    </a>
+
+    <div class="tabs">
+        <a href="#">Help</a>
+        <a href="#">Contact</a>
+        <a href="#">Login</a>
+    </div>
+</div>
+
+
 <div style="padding: 20px; display: flex; align-items: center; gap: 25px;">
 
     <!-- First Image -->
