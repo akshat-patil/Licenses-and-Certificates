@@ -1,34 +1,18 @@
-<div style="padding: 20px; display: flex; align-items: center; gap: 20px;">
-    <img src="Req/logo.png" height="60" width="50" />
-
-    <a href="https://your-link-here.com">
-        <img src="Req/second.png" height="60" width="50" />
-    </a>
-</div>
-
-
-
-<div style="padding: 20px;">
-    <img src="Req/logo.png" height="60" width="50" style="margin-right: 20px;" />
-
-    <a href="https://your-link-here.com">
-        <img src="Req/second.png" height="60" width="50" />
-    </a>
-</div>
-----------
-
-
-
-
-
-
 <style>
+    /* ---- Animations ---- */
+    @keyframes slideFade {
+        0% { opacity: 0; transform: translateX(-50px); }
+        100% { opacity: 1; transform: translateX(0); }
+    }
+
+    /* ---- Top Bar ---- */
     .topbar {
         padding: 20px; 
         display: flex; 
         align-items: center; 
         gap: 25px; 
         font-family: 'Segoe UI', Arial, sans-serif;
+        animation: slideFade 0.8s ease-out;
     }
 
     .tabs {
@@ -36,18 +20,64 @@
         gap: 25px; 
         font-size: 18px; 
         font-weight: bold;
+        animation: slideFade 1s ease-out;
     }
 
     .tabs a {
         text-decoration: none; 
         color: black;
     }
+
+    /* ---- Big Text ---- */
+    .big-text {
+        margin-top: 40px;
+        font-size: 55px;
+        font-weight: bold;
+        line-height: 1;
+        font-family: 'Segoe UI', Arial;
+        animation: slideFade 1.2s ease-out;
+    }
+
+    /* ---- Search Bar Expand ---- */
+    .search-container {
+        margin-top: 25px;
+        display: flex;
+        align-items: center;
+        animation: slideFade 1.4s ease-out;
+    }
+
+    .search-box {
+        width: 40px;                    /* collapsed size */
+        height: 40px;
+        transition: 0.4s ease;
+        border-radius: 30px;
+        border: 2px solid gray;
+        padding-left: 15px;
+        font-size: 16px;
+        opacity: 0;                     /* hidden initially */
+        pointer-events: none;           /* cannot type until opened */
+    }
+
+    .search-icon {
+        font-size: 25px;
+        margin-left: 10px;
+        cursor: pointer;
+        user-select: none;
+    }
+
+    /* Expand when active */
+    .search-box.active {
+        width: 250px;                   /* expanded width */
+        opacity: 1;
+        pointer-events: auto;           /* allow typing */
+    }
 </style>
 
+<!-- ---- TOP BAR ---- -->
 <div class="topbar">
     <img src="Req/logo.png" height="60" width="50" />
 
-    <a href="https://your-link.com">
+    <a href="#">
         <img src="Req/second.png" height="60" width="50" />
     </a>
 
@@ -58,65 +88,29 @@
     </div>
 </div>
 
+<!-- ---- BIG TITLE TEXT ---- -->
+<div class="big-text">
+    TDK<br>
+    WEB<br>
+    PORTAL
+</div>
 
-
-
-
-
-
-
-<style>
-    .topbar {
-        padding: 20px; 
-        display: flex; 
-        align-items: center; 
-        gap: 25px; 
-        font-family: 'Segoe UI', Arial, sans-serif;
-    }
-
-    .tabs {
-        display: flex; 
-        gap: 25px; 
-        font-size: 18px; 
-        font-weight: bold;
-    }
-
-    .tabs a {
-        text-decoration: none; 
-        color: black;
-    }
-</style>
-
-<div class="topbar">
-    <img src="Req/logo.png" height="60" width="50" />
-
-    <a href="https://your-link.com">
-        <img src="Req/second.png" height="60" width="50" />
-    </a>
-
-    <div class="tabs">
-        <a href="#">Help</a>
-        <a href="#">Contact</a>
-        <a href="#">Login</a>
-    </div>
+<!-- ---- SEARCH ICON + EXPANDABLE SEARCH ---- -->
+<div class="search-container">
+    <input type="text" id="searchBox" class="search-box" placeholder="Search...">
+    <span class="search-icon" onclick="toggleSearch()">🔍</span>
 </div>
 
 
-<div style="padding: 20px; display: flex; align-items: center; gap: 25px;">
+<!-- ---- SCRIPT FOR EXPANDING SEARCH BAR ---- -->
+<script>
+function toggleSearch() {
+    const box = document.getElementById("searchBox");
+    box.classList.toggle("active");
 
-    <!-- First Image -->
-    <img src="Req/logo.png" height="60" width="50" />
-
-    <!-- Second Image with Link -->
-    <a href="https://your-link.com">
-        <img src="Req/second.png" height="60" width="50" />
-    </a>
-
-    <!-- Tabs Section -->
-    <div style="display: flex; gap: 25px; font-size: 18px;">
-        <a href="#" style="text-decoration: none;">Help</a>
-        <a href="#" style="text-decoration: none;">Contact</a>
-        <a href="#" style="text-decoration: none;">Login</a>
-    </div>
-
-</div>
+    // focus automatically when expanded
+    if (box.classList.contains("active")) {
+        box.focus();
+    }
+}
+</script>
