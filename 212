@@ -1,0 +1,17 @@
+<div style="padding: 20px; display: flex; align-items: center; gap: 20px;">
+    <img src="Req/logo.png" height="60" width="50" />
+
+    <a href="https://your-link-here.com">
+        <img src="Req/second.png" height="60" width="50" />
+    </a>
+</div>
+
+
+
+<div style="padding: 20px;">
+    <img src="Req/logo.png" height="60" width="50" style="margin-right: 20px;" />
+
+    <a href="https://your-link-here.com">
+        <img src="Req/second.png" height="60" width="50" />
+    </a>
+</div>
