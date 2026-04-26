@@ -1,0 +1,25 @@
+You are generating a COMPLETE ASPX markup file.
+
+IMPORTANT RULES (STRICT):
+1. You MUST return the FULL updated code, not partial snippets.
+2. Do NOT skip any section of the original code.
+3. Do NOT replace unchanged sections with comments like "keep as is".
+4. Do NOT summarize or shorten anything.
+5. Every control (GridView, panels, divs, scripts, styles, etc.) must remain unless explicitly removed.
+6. Apply my requested changes, but preserve everything else EXACTLY as in the original.
+7. Output must be COPY-PASTE READY and runnable.
+
+FORMAT RULES:
+- Return ONLY the final ASPX code.
+- No explanations, no comments outside code.
+- No placeholders like "...".
+- No missing sections.
+
+TASK:
+Here is my original ASPX code:
+[PASTE FULL CODE HERE]
+
+Apply the following changes:
+[LIST YOUR CHANGES CLEARLY]
+
+Now regenerate the FULL updated ASPX file following ALL rules above.
